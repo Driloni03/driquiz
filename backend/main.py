@@ -1,5 +1,5 @@
 """
-Quiz Generator API - FastAPI backend (Azure OpenAI version, deployment-ready)
+Quiz Generator API - FastAPI backend (Azure OpenAI, with streaming chat)
 """
 import os
 import json
@@ -11,19 +11,16 @@ from collections import defaultdict, deque
 
 from fastapi import FastAPI, File, UploadFile, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from openai import AzureOpenAI
-import fitz  # PyMuPDF
+import fitz
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# ---------------------------------------------------------------------------
-# Setup
-# ---------------------------------------------------------------------------
-app = FastAPI(title="Quiz Generator API", version="1.0.0")
+app = FastAPI(title="Quiz Generator API", version="1.1.0")
 
-# Read allowed origins from env (comma-separated). Falls back to localhost for dev.
 ALLOWED_ORIGINS = os.getenv(
     "ALLOWED_ORIGINS",
     "http://localhost:5173,http://localhost:3000",
@@ -47,26 +44,36 @@ DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT")
 QUIZZES: dict = {}
 
 # ---------------------------------------------------------------------------
-# Simple per-IP rate limiting (5 quiz generations per hour)
+# Rate limiting
 # ---------------------------------------------------------------------------
 RATE_LIMIT_REQUESTS = int(os.getenv("RATE_LIMIT_REQUESTS", "5"))
 RATE_LIMIT_WINDOW_SEC = int(os.getenv("RATE_LIMIT_WINDOW_SEC", "3600"))
-_request_log: dict = defaultdict(deque)
+CHAT_RATE_LIMIT = int(os.getenv("CHAT_RATE_LIMIT", "30"))
+_quiz_log = defaultdict(deque)
+_chat_log = defaultdict(deque)
 
 
-def check_rate_limit(request: Request):
-    ip = request.client.host if request.client else "unknown"
+def _check(log, ip, limit, window, label):
     now = time.time()
-    log = _request_log[ip]
-    while log and log[0] < now - RATE_LIMIT_WINDOW_SEC:
-        log.popleft()
-    if len(log) >= RATE_LIMIT_REQUESTS:
-        retry_in = int(RATE_LIMIT_WINDOW_SEC - (now - log[0]))
+    while log[ip] and log[ip][0] < now - window:
+        log[ip].popleft()
+    if len(log[ip]) >= limit:
+        retry_in = int(window - (now - log[ip][0]))
         raise HTTPException(
             status_code=429,
-            detail=f"Rate limit reached. Try again in ~{retry_in // 60} min.",
+            detail=f"{label} rate limit reached. Try again in ~{max(1, retry_in // 60)} min.",
         )
-    log.append(now)
+    log[ip].append(now)
+
+
+def check_quiz_rate_limit(request: Request):
+    ip = request.client.host if request.client else "unknown"
+    _check(_quiz_log, ip, RATE_LIMIT_REQUESTS, RATE_LIMIT_WINDOW_SEC, "Quiz")
+
+
+def check_chat_rate_limit(request: Request):
+    ip = request.client.host if request.client else "unknown"
+    _check(_chat_log, ip, CHAT_RATE_LIMIT, RATE_LIMIT_WINDOW_SEC, "Chat")
 
 
 # ---------------------------------------------------------------------------
@@ -95,9 +102,7 @@ class GenerateRequest(BaseModel):
     text: str
     num_questions: int = Field(default=5, ge=1, le=15)
     difficulty: Literal["easy", "medium", "hard", "mixed"] = "mixed"
-    question_types: List[Literal["multiple_choice", "true_false", "short_answer"]] = [
-        "multiple_choice"
-    ]
+    question_types: List[Literal["multiple_choice", "true_false", "short_answer"]] = ["multiple_choice"]
     title: Optional[str] = "Untitled Quiz"
 
 
@@ -111,24 +116,30 @@ class SubmitQuizRequest(BaseModel):
     answers: List[AnswerSubmission]
 
 
+class ChatMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str
+
+
+class ChatRequest(BaseModel):
+    messages: List[ChatMessage] = Field(..., min_length=1, max_length=30)
+    mode: Literal["tutor", "general"] = "general"
+    context: Optional[str] = None  # the study material when in tutor mode
+
+
 # ---------------------------------------------------------------------------
-# PDF & Chunking
+# PDF & chunking
 # ---------------------------------------------------------------------------
 def extract_pdf_text(file_bytes: bytes) -> str:
     doc = fitz.open(stream=file_bytes, filetype="pdf")
-    pages = []
-    for page in doc:
-        text = page.get_text("text")
-        if text.strip():
-            pages.append(text)
+    pages = [p.get_text("text") for p in doc if p.get_text("text").strip()]
     doc.close()
     return "\n\n".join(pages)
 
 
 def chunk_text(text: str, max_chars: int = 4000) -> List[str]:
     paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
-    chunks: List[str] = []
-    current = ""
+    chunks, current = [], ""
     for para in paragraphs:
         if len(current) + len(para) + 2 <= max_chars:
             current += ("\n\n" if current else "") + para
@@ -192,12 +203,7 @@ For true_false and short_answer questions, set "options": null.
 
 def generate_questions_from_chunk(chunk, num_questions, difficulty, types):
     types_str = ", ".join(types)
-    prompt = QUIZ_PROMPT.format(
-        content=chunk,
-        num_questions=num_questions,
-        difficulty=difficulty,
-        types=types_str,
-    )
+    prompt = QUIZ_PROMPT.format(content=chunk, num_questions=num_questions, difficulty=difficulty, types=types_str)
     response = client.chat.completions.create(
         model=DEPLOYMENT,
         messages=[
@@ -229,8 +235,7 @@ def build_quiz(text, num_questions, difficulty, types, title) -> Quiz:
         n = per_chunk + (1 if i < remainder else 0)
         if n == 0:
             continue
-        qs = generate_questions_from_chunk(chunk, n, difficulty, types)
-        all_questions.extend(qs)
+        all_questions.extend(generate_questions_from_chunk(chunk, n, difficulty, types))
     all_questions = all_questions[:num_questions]
     questions = [
         Question(
@@ -258,6 +263,69 @@ def build_quiz(text, num_questions, difficulty, types, title) -> Quiz:
 
 
 # ---------------------------------------------------------------------------
+# Chat
+# ---------------------------------------------------------------------------
+TUTOR_SYSTEM_PROMPT = """You are a friendly, patient study tutor. The student has provided study material below. Use it as the primary source for your answers.
+
+When answering:
+- Base your answers on the provided material whenever possible
+- If the material doesn't cover the question, you can use general knowledge but say so clearly
+- Explain concepts simply, with examples when helpful
+- Keep answers focused and not overly long
+- If the student's question is unclear, ask a quick clarifying question
+- Match the language of your responses to the language the student uses
+
+STUDY MATERIAL:
+\"\"\"
+{material}
+\"\"\""""
+
+GENERAL_SYSTEM_PROMPT = """You are a helpful, friendly assistant. Answer the user's questions clearly and concisely. Match the language they use."""
+
+
+def build_chat_messages(req: ChatRequest):
+    if req.mode == "tutor":
+        material = (req.context or "").strip()
+        if not material:
+            raise HTTPException(status_code=400, detail="Tutor mode requires study material.")
+        # Cap material length to keep prompt reasonable
+        if len(material) > 25000:
+            material = material[:25000] + "\n\n[truncated]"
+        system = TUTOR_SYSTEM_PROMPT.format(material=material)
+    else:
+        system = GENERAL_SYSTEM_PROMPT
+
+    messages = [{"role": "system", "content": system}]
+    for m in req.messages:
+        messages.append({"role": m.role, "content": m.content})
+    return messages
+
+
+def stream_chat(messages):
+    """Generator that yields server-sent-events data chunks."""
+    try:
+        stream = client.chat.completions.create(
+            model=DEPLOYMENT,
+            messages=messages,
+            temperature=0.7,
+            max_tokens=1024,
+            stream=True,
+        )
+        for chunk in stream:
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
+            if delta and delta.content:
+                payload = json.dumps({"delta": delta.content})
+                yield f"data: {payload}\n\n"
+        yield "data: [DONE]\n\n"
+    except Exception as e:
+        err = json.dumps({"error": str(e)})
+        yield f"data: {err}\n\n"
+        yield "data: [DONE]\n\n"
+
+
+# ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
 @app.get("/")
@@ -275,7 +343,7 @@ async def upload_pdf(file: UploadFile = File(...)):
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are allowed.")
     contents = await file.read()
-    if len(contents) > 10 * 1024 * 1024:  # 10 MB cap on free tier
+    if len(contents) > 10 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="PDF too large (max 10 MB).")
     try:
         text = extract_pdf_text(contents)
@@ -288,7 +356,7 @@ async def upload_pdf(file: UploadFile = File(...)):
 
 @app.post("/api/generate-quiz", response_model=Quiz)
 def generate_quiz(req: GenerateRequest, request: Request):
-    check_rate_limit(request)
+    check_quiz_rate_limit(request)
     if not req.text.strip():
         raise HTTPException(status_code=400, detail="Text is empty.")
     if len(req.text) < 100:
@@ -318,28 +386,36 @@ def submit_quiz(req: SubmitQuizRequest):
     if not quiz:
         raise HTTPException(status_code=404, detail="Quiz not found.")
     answers_map = {a.question_id: a.user_answer for a in req.answers}
-    results = []
-    correct_count = 0
+    results, correct_count = [], 0
     for q in quiz.questions:
         user_ans = answers_map.get(q.id, "").strip()
         is_correct = user_ans.lower() == q.correct_answer.strip().lower()
         if is_correct:
             correct_count += 1
         results.append({
-            "question_id": q.id,
-            "question": q.question,
-            "user_answer": user_ans,
-            "correct_answer": q.correct_answer,
-            "is_correct": is_correct,
-            "explanation": q.explanation,
+            "question_id": q.id, "question": q.question,
+            "user_answer": user_ans, "correct_answer": q.correct_answer,
+            "is_correct": is_correct, "explanation": q.explanation,
             "source_chunk": q.source_chunk,
         })
     total = len(quiz.questions)
-    score_pct = round(100 * correct_count / total, 1) if total else 0
     return {
-        "quiz_id": req.quiz_id,
-        "score": correct_count,
-        "total": total,
-        "percentage": score_pct,
+        "quiz_id": req.quiz_id, "score": correct_count, "total": total,
+        "percentage": round(100 * correct_count / total, 1) if total else 0,
         "results": results,
     }
+
+
+@app.post("/api/chat")
+def chat(req: ChatRequest, request: Request):
+    """Streaming chat endpoint. Returns Server-Sent Events."""
+    check_chat_rate_limit(request)
+    messages = build_chat_messages(req)
+    return StreamingResponse(
+        stream_chat(messages),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",  # disable proxy buffering
+        },
+    )

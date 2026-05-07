@@ -28,3 +28,51 @@ export const submitQuiz = async (quizId, answers) => {
   })
   return data
 }
+
+/**
+ * Stream a chat response. onDelta is called with each text chunk.
+ * Returns a promise that resolves when streaming completes.
+ */
+export const streamChat = async ({ messages, mode, context, onDelta, signal }) => {
+  const response = await fetch(`${API_BASE}/api/chat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ messages, mode, context }),
+    signal,
+  })
+
+  if (!response.ok) {
+    let detail = `HTTP ${response.status}`
+    try {
+      const err = await response.json()
+      detail = err.detail || detail
+    } catch (_) {}
+    throw new Error(detail)
+  }
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+
+    const lines = buffer.split('\n')
+    buffer = lines.pop() || ''
+
+    for (const line of lines) {
+      if (!line.startsWith('data: ')) continue
+      const data = line.slice(6).trim()
+      if (data === '[DONE]') return
+      try {
+        const parsed = JSON.parse(data)
+        if (parsed.error) throw new Error(parsed.error)
+        if (parsed.delta) onDelta(parsed.delta)
+      } catch (e) {
+        if (e.message && !e.message.includes('JSON')) throw e
+      }
+    }
+  }
+}
