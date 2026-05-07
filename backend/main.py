@@ -26,7 +26,11 @@ app = FastAPI(title="Quiz Generator API", version="1.3.1")
 
 ALLOWED_ORIGINS = os.getenv(
     "ALLOWED_ORIGINS",
-    "http://localhost:5173,http://localhost:3000,http://localhost:5174",
+    allow_origins=[
+    "http://localhost:5173",
+    "http://localhost:5174",
+    "https://driquiz.vercel.app",
+],
 ).split(",")
 
 app.add_middleware(
