@@ -24,18 +24,17 @@ load_dotenv()
 
 app = FastAPI(title="Quiz Generator API", version="1.3.1")
 
-ALLOWED_ORIGINS = os.getenv(
-    "ALLOWED_ORIGINS",
-    allow_origins=[
+Afrom fastapi.middleware.cors import CORSMiddleware
+
+ALLOWED_ORIGINS = [
     "http://localhost:5173",
     "http://localhost:5174",
     "https://driquiz.vercel.app",
-],
-).split(",")
+]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[o.strip() for o in ALLOWED_ORIGINS],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
