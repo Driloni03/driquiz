@@ -24,7 +24,7 @@ load_dotenv()
 
 app = FastAPI(title="Quiz Generator API", version="1.3.1")
 
-Afrom fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.cors import CORSMiddleware
 
 ALLOWED_ORIGINS = [
     "http://localhost:5173",
