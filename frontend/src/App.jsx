@@ -1,6 +1,6 @@
 import { useState } from 'react'
-import { Upload, FileText, Sparkles, CheckCircle2, XCircle, RotateCcw, BookOpen, Loader2 } from 'lucide-react'
-import { uploadPdf, generateQuiz, submitQuiz } from './api'
+import { Upload, FileText, Sparkles, CheckCircle2, XCircle, RotateCcw, BookOpen, Loader2, Video as Youtube, Clock } from 'lucide-react'
+import { uploadPdf, generateQuiz, submitQuiz, fetchYoutubeTranscript, formatTimestamp, youtubeLinkAt } from './api'
 import ChatWidget from './ChatWidget'
 
 const QUESTION_TYPE_LABELS = {
@@ -18,9 +18,12 @@ const DIFFICULTY_LABELS = {
 
 export default function App() {
   const [view, setView] = useState('setup')
-  const [inputMode, setInputMode] = useState('text')
+  const [inputMode, setInputMode] = useState('text') // 'text' | 'pdf' | 'youtube'
   const [text, setText] = useState('')
   const [title, setTitle] = useState('')
+  const [sourceType, setSourceType] = useState('text')  // tracked separately
+  const [youtubeUrl, setYoutubeUrl] = useState('')
+  const [youtubeVideoId, setYoutubeVideoId] = useState(null)
   const [numQuestions, setNumQuestions] = useState(5)
   const [difficulty, setDifficulty] = useState('mixed')
   const [questionTypes, setQuestionTypes] = useState(['multiple_choice'])
@@ -40,6 +43,8 @@ export default function App() {
     try {
       const data = await uploadPdf(file)
       setText(data.text)
+      setSourceType('pdf')
+      setYoutubeVideoId(null)
       if (!title) setTitle(file.name.replace(/\.pdf$/i, ''))
     } catch (err) {
       setError(err.response?.data?.detail || 'Error uploading PDF.')
@@ -47,6 +52,38 @@ export default function App() {
       setLoading(false)
       setLoadingMsg('')
     }
+  }
+
+  const handleYoutubeFetch = async () => {
+    if (!youtubeUrl.trim()) {
+      setError('Paste a YouTube URL first.')
+      return
+    }
+    setError('')
+    setLoading(true)
+    setLoadingMsg('Fetching transcript...')
+    try {
+      const data = await fetchYoutubeTranscript(youtubeUrl.trim())
+      setText(data.text)
+      setSourceType('youtube')
+      setYoutubeVideoId(data.video_id)
+      if (!title) setTitle(data.title)
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Could not fetch transcript.')
+    } finally {
+      setLoading(false)
+      setLoadingMsg('')
+    }
+  }
+
+  const switchInputMode = (mode) => {
+    setInputMode(mode)
+    setError('')
+    // Reset content when switching modes
+    setText('')
+    setYoutubeVideoId(null)
+    setYoutubeUrl('')
+    setSourceType(mode === 'youtube' ? 'youtube' : 'text')
   }
 
   const toggleType = (type) => {
@@ -58,7 +95,7 @@ export default function App() {
   const handleGenerate = async () => {
     setError('')
     if (!text.trim() || text.length < 100) {
-      setError('Text must be at least 100 characters.')
+      setError('Material must be at least 100 characters.')
       return
     }
     if (questionTypes.length === 0) {
@@ -74,6 +111,8 @@ export default function App() {
         difficulty,
         question_types: questionTypes,
         title: title || 'Untitled Quiz',
+        source_type: sourceType,
+        youtube_video_id: youtubeVideoId,
       })
       setQuiz(data)
       setAnswers({})
@@ -134,7 +173,7 @@ export default function App() {
       <div className="container">
         <div className="header">
           <h1>📚 AI Quiz Generator</h1>
-          <p>Create quizzes automatically from your study materials with Claude</p>
+          <p>Create quizzes from text, PDFs, or YouTube lectures</p>
         </div>
 
         {error && <div className="alert alert-error">⚠️ {error}</div>}
@@ -142,11 +181,15 @@ export default function App() {
         {view === 'setup' && (
           <SetupView
             inputMode={inputMode}
-            setInputMode={setInputMode}
+            switchInputMode={switchInputMode}
             text={text}
             setText={setText}
             title={title}
             setTitle={setTitle}
+            youtubeUrl={youtubeUrl}
+            setYoutubeUrl={setYoutubeUrl}
+            youtubeVideoId={youtubeVideoId}
+            handleYoutubeFetch={handleYoutubeFetch}
             numQuestions={numQuestions}
             setNumQuestions={setNumQuestions}
             difficulty={difficulty}
@@ -187,28 +230,38 @@ export default function App() {
   )
 }
 
-function SetupView({
-  inputMode, setInputMode, text, setText, title, setTitle,
-  numQuestions, setNumQuestions, difficulty, setDifficulty,
-  questionTypes, toggleType, handlePdfUpload, handleGenerate,
-  loading, loadingMsg
-}) {
+function SetupView(props) {
+  const {
+    inputMode, switchInputMode, text, setText, title, setTitle,
+    youtubeUrl, setYoutubeUrl, youtubeVideoId, handleYoutubeFetch,
+    numQuestions, setNumQuestions, difficulty, setDifficulty,
+    questionTypes, toggleType, handlePdfUpload, handleGenerate,
+    loading, loadingMsg
+  } = props
+
   return (
     <>
       <div className="card">
         <h2><FileText size={20} /> Study Material</h2>
         <div className="tabs">
-          <button className={`tab ${inputMode === 'text' ? 'active' : ''}`} onClick={() => setInputMode('text')}>Paste Text</button>
-          <button className={`tab ${inputMode === 'pdf' ? 'active' : ''}`} onClick={() => setInputMode('pdf')}>Upload PDF</button>
+          <button className={`tab ${inputMode === 'text' ? 'active' : ''}`} onClick={() => switchInputMode('text')}>Paste Text</button>
+          <button className={`tab ${inputMode === 'pdf' ? 'active' : ''}`} onClick={() => switchInputMode('pdf')}>Upload PDF</button>
+          <button className={`tab ${inputMode === 'youtube' ? 'active' : ''}`} onClick={() => switchInputMode('youtube')}>
+            <Youtube size={14} style={{ verticalAlign: 'middle', marginRight: 4 }} />
+            YouTube
+          </button>
         </div>
-        {inputMode === 'pdf' ? (
+
+        {inputMode === 'pdf' && (
           <label className="upload-zone">
             <input type="file" accept=".pdf" onChange={handlePdfUpload} disabled={loading} />
             <Upload size={32} className="icon" />
             <div><strong>Click to upload PDF</strong></div>
             <div className="text-info">Maximum 10 MB</div>
           </label>
-        ) : (
+        )}
+
+        {inputMode === 'text' && (
           <textarea
             className="textarea"
             placeholder="Paste your study material here (lecture notes, textbook chapters, articles...)"
@@ -217,7 +270,33 @@ function SetupView({
             disabled={loading}
           />
         )}
-        {text && (
+
+        {inputMode === 'youtube' && (
+          <>
+            <div style={{ display: 'flex', gap: '0.5rem' }}>
+              <input
+                className="input"
+                placeholder="Paste a YouTube URL (e.g. https://www.youtube.com/watch?v=...)"
+                value={youtubeUrl}
+                onChange={(e) => setYoutubeUrl(e.target.value)}
+                disabled={loading}
+              />
+              <button className="btn" onClick={handleYoutubeFetch} disabled={loading || !youtubeUrl.trim()}>
+                {loading ? <Loader2 size={16} className="spinner" /> : 'Fetch'}
+              </button>
+            </div>
+            <div className="text-info" style={{ marginTop: '0.5rem' }}>
+              Works with most public YouTube videos that have captions/subtitles.
+            </div>
+            {youtubeVideoId && (
+              <div className="text-info" style={{ marginTop: '0.5rem', color: '#6ee7b7' }}>
+                ✓ Transcript loaded from video <code>{youtubeVideoId}</code>
+              </div>
+            )}
+          </>
+        )}
+
+        {text && inputMode !== 'youtube' && (
           <div className="text-info">✓ {text.length.toLocaleString()} characters loaded</div>
         )}
       </div>
@@ -262,19 +341,41 @@ function SetupView({
   )
 }
 
+function TimestampLink({ videoId, seconds }) {
+  if (videoId == null || seconds == null) return null
+  const url = youtubeLinkAt(videoId, seconds)
+  return (
+    <a className="timestamp-link" href={url} target="_blank" rel="noopener noreferrer" title="Open at this timestamp">
+      <Clock size={13} /> {formatTimestamp(seconds)}
+    </a>
+  )
+}
+
 function QuizView({ quiz, answers, handleAnswer, handleSubmit, loading, loadingMsg, reset }) {
   const answeredCount = Object.values(answers).filter((a) => a && a.trim()).length
+  const videoId = quiz.youtube_video_id
+
   return (
     <>
       <div className="card">
-        <h2><BookOpen size={20} /> {quiz.title}</h2>
+        <h2>
+          <BookOpen size={20} /> {quiz.title}
+          {quiz.source_type === 'youtube' && (
+            <span className="badge badge-medium" style={{ marginLeft: '0.5rem' }}>
+              <Youtube size={12} style={{ verticalAlign: 'middle', marginRight: 3 }} /> YouTube
+            </span>
+          )}
+        </h2>
         <div className="text-info">{answeredCount} / {quiz.questions.length} questions answered</div>
       </div>
       {quiz.questions.map((q, idx) => (
         <div key={q.id} className="question-card">
           <div className="question-header">
             <span className="question-number">Question {idx + 1} / {quiz.questions.length}</span>
-            <span className={`badge badge-${q.difficulty}`}>{DIFFICULTY_LABELS[q.difficulty] || q.difficulty}</span>
+            <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+              <TimestampLink videoId={videoId} seconds={q.timestamp_seconds} />
+              <span className={`badge badge-${q.difficulty}`}>{DIFFICULTY_LABELS[q.difficulty] || q.difficulty}</span>
+            </div>
           </div>
           <div className="question-text">{q.question}</div>
           {q.type === 'multiple_choice' && q.options && (
@@ -314,6 +415,7 @@ function QuizView({ quiz, answers, handleAnswer, handleSubmit, loading, loadingM
 
 function ResultsView({ results, quiz, retake, reset }) {
   const { score, total, percentage } = results
+  const videoId = results.youtube_video_id || quiz.youtube_video_id
   const message =
     percentage >= 80 ? '🎉 Excellent!' :
     percentage >= 60 ? '👍 Good job!' :
@@ -332,9 +434,12 @@ function ResultsView({ results, quiz, retake, reset }) {
           <div key={r.question_id} className={`question-card result-card ${r.is_correct ? 'correct' : 'incorrect'}`}>
             <div className="question-header">
               <span className="question-number">Question {idx + 1}</span>
-              <div className={`result-icon ${r.is_correct ? 'correct' : 'incorrect'}`}>
-                {r.is_correct ? <CheckCircle2 size={18} /> : <XCircle size={18} />}
-                {r.is_correct ? 'Correct' : 'Incorrect'}
+              <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                <TimestampLink videoId={videoId} seconds={r.timestamp_seconds} />
+                <div className={`result-icon ${r.is_correct ? 'correct' : 'incorrect'}`}>
+                  {r.is_correct ? <CheckCircle2 size={18} /> : <XCircle size={18} />}
+                  {r.is_correct ? 'Correct' : 'Incorrect'}
+                </div>
               </div>
             </div>
             <div className="question-text">{r.question}</div>

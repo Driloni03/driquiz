@@ -1118,3 +1118,26 @@ button {
     height: calc(100vh - 1rem);
   }
 }
+/* ============================================================
+   YOUTUBE TIMESTAMP STYLES — append to your existing styles.css
+   ============================================================ */
+
+.timestamp-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  background: rgba(99, 102, 241, 0.1);
+  color: var(--primary);
+  padding: 0.2rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 500;
+  text-decoration: none;
+  border: 1px solid rgba(99, 102, 241, 0.25);
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.timestamp-link:hover {
+  background: rgba(99, 102, 241, 0.2);
+  border-color: var(--primary);
+}

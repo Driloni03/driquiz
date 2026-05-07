@@ -16,6 +16,11 @@ export const uploadPdf = async (file) => {
   return data
 }
 
+export const fetchYoutubeTranscript = async (url) => {
+  const { data } = await api.post('/api/youtube', { url })
+  return data
+}
+
 export const generateQuiz = async (payload) => {
   const { data } = await api.post('/api/generate-quiz', payload)
   return data
@@ -29,10 +34,6 @@ export const submitQuiz = async (quizId, answers) => {
   return data
 }
 
-/**
- * Stream a chat response. onDelta is called with each text chunk.
- * Returns a promise that resolves when streaming completes.
- */
 export const streamChat = async ({ messages, mode, context, onDelta, signal }) => {
   const response = await fetch(`${API_BASE}/api/chat`, {
     method: 'POST',
@@ -75,4 +76,19 @@ export const streamChat = async ({ messages, mode, context, onDelta, signal }) =
       }
     }
   }
+}
+
+// Helper: format seconds as M:SS
+export const formatTimestamp = (seconds) => {
+  if (seconds == null || isNaN(seconds)) return ''
+  const m = Math.floor(seconds / 60)
+  const s = Math.floor(seconds % 60)
+  return `${m}:${String(s).padStart(2, '0')}`
+}
+
+// Helper: build YouTube link with timestamp
+export const youtubeLinkAt = (videoId, seconds) => {
+  if (!videoId) return null
+  const t = seconds != null ? Math.max(0, Math.floor(seconds)) : 0
+  return `https://www.youtube.com/watch?v=${videoId}&t=${t}s`
 }

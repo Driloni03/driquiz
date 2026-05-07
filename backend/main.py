@@ -1,10 +1,13 @@
 """
-Quiz Generator API - FastAPI backend (Azure OpenAI, with streaming chat)
+Quiz Generator API - FastAPI backend (with resilient YouTube transcript fetching)
 """
 import os
+import re
 import json
 import uuid
 import time
+import sqlite3
+from contextlib import contextmanager
 from typing import List, Optional, Literal
 from datetime import datetime
 from collections import defaultdict, deque
@@ -19,11 +22,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-app = FastAPI(title="Quiz Generator API", version="1.1.0")
+app = FastAPI(title="Quiz Generator API", version="1.3.1")
 
 ALLOWED_ORIGINS = os.getenv(
     "ALLOWED_ORIGINS",
-    "http://localhost:5173,http://localhost:3000",
+    "http://localhost:5173,http://localhost:3000,http://localhost:5174",
 ).split(",")
 
 app.add_middleware(
@@ -41,7 +44,102 @@ client = AzureOpenAI(
 )
 DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT")
 
-QUIZZES: dict = {}
+# ---------------------------------------------------------------------------
+# SQLite setup
+# ---------------------------------------------------------------------------
+DB_PATH = os.getenv("DB_PATH", "quizzes.db")
+
+
+@contextmanager
+def get_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+def init_db():
+    with get_db() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS quizzes (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                source_text_preview TEXT,
+                source_type TEXT DEFAULT 'text',
+                youtube_video_id TEXT,
+                questions_json TEXT NOT NULL
+            )
+            """
+        )
+        for col, sql in [
+            ("source_type", "ALTER TABLE quizzes ADD COLUMN source_type TEXT DEFAULT 'text'"),
+            ("youtube_video_id", "ALTER TABLE quizzes ADD COLUMN youtube_video_id TEXT"),
+        ]:
+            try:
+                conn.execute(sql)
+            except sqlite3.OperationalError:
+                pass
+        conn.commit()
+
+
+init_db()
+
+
+def save_quiz(quiz_dict: dict):
+    with get_db() as conn:
+        conn.execute(
+            """INSERT OR REPLACE INTO quizzes
+            (id, title, created_at, source_text_preview, source_type, youtube_video_id, questions_json)
+            VALUES (?,?,?,?,?,?,?)""",
+            (
+                quiz_dict["id"],
+                quiz_dict["title"],
+                quiz_dict["created_at"],
+                quiz_dict["source_text_preview"],
+                quiz_dict.get("source_type", "text"),
+                quiz_dict.get("youtube_video_id"),
+                json.dumps(quiz_dict["questions"]),
+            ),
+        )
+        conn.commit()
+
+
+def load_quiz(quiz_id: str) -> Optional[dict]:
+    with get_db() as conn:
+        row = conn.execute("SELECT * FROM quizzes WHERE id = ?", (quiz_id,)).fetchone()
+        if not row:
+            return None
+        return {
+            "id": row["id"],
+            "title": row["title"],
+            "created_at": row["created_at"],
+            "source_text_preview": row["source_text_preview"],
+            "source_type": row["source_type"] or "text",
+            "youtube_video_id": row["youtube_video_id"],
+            "questions": json.loads(row["questions_json"]),
+        }
+
+
+def list_all_quizzes():
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT id, title, created_at, source_type, questions_json FROM quizzes ORDER BY created_at DESC LIMIT 100"
+        ).fetchall()
+        return [
+            {
+                "id": r["id"],
+                "title": r["title"],
+                "created_at": r["created_at"],
+                "source_type": r["source_type"] or "text",
+                "num_questions": len(json.loads(r["questions_json"])),
+            }
+            for r in rows
+        ]
+
 
 # ---------------------------------------------------------------------------
 # Rate limiting
@@ -88,6 +186,7 @@ class Question(BaseModel):
     explanation: str
     source_chunk: str
     difficulty: Literal["easy", "medium", "hard"]
+    timestamp_seconds: Optional[int] = None
 
 
 class Quiz(BaseModel):
@@ -96,6 +195,8 @@ class Quiz(BaseModel):
     created_at: str
     questions: List[Question]
     source_text_preview: str
+    source_type: str = "text"
+    youtube_video_id: Optional[str] = None
 
 
 class GenerateRequest(BaseModel):
@@ -104,6 +205,12 @@ class GenerateRequest(BaseModel):
     difficulty: Literal["easy", "medium", "hard", "mixed"] = "mixed"
     question_types: List[Literal["multiple_choice", "true_false", "short_answer"]] = ["multiple_choice"]
     title: Optional[str] = "Untitled Quiz"
+    source_type: Literal["text", "pdf", "youtube"] = "text"
+    youtube_video_id: Optional[str] = None
+
+
+class YouTubeRequest(BaseModel):
+    url: str
 
 
 class AnswerSubmission(BaseModel):
@@ -124,7 +231,103 @@ class ChatMessage(BaseModel):
 class ChatRequest(BaseModel):
     messages: List[ChatMessage] = Field(..., min_length=1, max_length=30)
     mode: Literal["tutor", "general"] = "general"
-    context: Optional[str] = None  # the study material when in tutor mode
+    context: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# YouTube — supports both 0.6.x and 1.x library versions
+# ---------------------------------------------------------------------------
+YOUTUBE_ID_PATTERNS = [
+    r"(?:v=|/v/|youtu\.be/|/embed/|/shorts/)([0-9A-Za-z_-]{11})",
+    r"^([0-9A-Za-z_-]{11})$",
+]
+
+
+def extract_youtube_id(url_or_id: str) -> Optional[str]:
+    s = url_or_id.strip()
+    for pattern in YOUTUBE_ID_PATTERNS:
+        match = re.search(pattern, s)
+        if match:
+            return match.group(1)
+    return None
+
+
+def get_video_title(video_id: str) -> str:
+    try:
+        import urllib.request
+        url = f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={video_id}&format=json"
+        with urllib.request.urlopen(url, timeout=10) as r:
+            data = json.loads(r.read().decode())
+            return data.get("title", f"YouTube video {video_id}")
+    except Exception:
+        return f"YouTube video {video_id}"
+
+
+def fetch_youtube_transcript(video_id: str) -> tuple[str, list]:
+    """
+    Robust transcript fetcher that works with multiple library versions.
+    Returns:
+      - transcript_text: text with [Ns] timestamps inline
+      - segments: list of {text, start, duration}
+    """
+    languages = ["en", "sq", "es", "fr", "de", "it", "sr", "hr", "mk"]
+    segments = None
+    last_err = None
+
+    # Try v1.x API first (newest)
+    try:
+        from youtube_transcript_api import YouTubeTranscriptApi
+        ytt = YouTubeTranscriptApi()
+        try:
+            fetched = ytt.fetch(video_id, languages=languages)
+        except Exception:
+            fetched = ytt.fetch(video_id)
+        # fetched is a FetchedTranscript with snippets
+        try:
+            segments = [
+                {"text": s.text, "start": s.start, "duration": s.duration}
+                for s in fetched
+            ]
+        except Exception:
+            # try .to_raw_data() if available
+            segments = fetched.to_raw_data() if hasattr(fetched, "to_raw_data") else None
+    except (ImportError, AttributeError, TypeError):
+        pass
+    except Exception as e:
+        last_err = e
+
+    # Fall back to v0.6.x API
+    if segments is None:
+        try:
+            from youtube_transcript_api import YouTubeTranscriptApi
+            try:
+                segments = YouTubeTranscriptApi.get_transcript(video_id, languages=languages)
+            except Exception:
+                segments = YouTubeTranscriptApi.get_transcript(video_id)
+        except Exception as e:
+            last_err = e
+
+    if not segments:
+        msg = str(last_err) if last_err else "Unknown error"
+        # Make common errors more friendly
+        if "TranscriptsDisabled" in msg or "transcripts are disabled" in msg.lower():
+            raise HTTPException(status_code=400, detail="This video has transcripts disabled.")
+        if "VideoUnavailable" in msg or "unavailable" in msg.lower():
+            raise HTTPException(status_code=400, detail="Video unavailable or private.")
+        if "NoTranscriptFound" in msg or "no transcript" in msg.lower():
+            raise HTTPException(status_code=400, detail="No transcript available for this video.")
+        raise HTTPException(status_code=400, detail=f"Could not fetch transcript: {msg}")
+
+    # Build text with [Ns] markers every ~25 seconds
+    parts, last_marker = [], -999
+    for seg in segments:
+        start = int(seg["start"])
+        if start - last_marker >= 25:
+            parts.append(f"[{start}s]")
+            last_marker = start
+        parts.append(seg["text"].replace("\n", " "))
+    text = " ".join(parts)
+    return text, segments
 
 
 # ---------------------------------------------------------------------------
@@ -157,6 +360,21 @@ def chunk_text(text: str, max_chars: int = 4000) -> List[str]:
     return chunks
 
 
+def chunk_text_for_youtube(text: str, max_chars: int = 4000) -> List[str]:
+    words = text.split(" ")
+    chunks, current = [], ""
+    for word in words:
+        if len(current) + len(word) + 1 <= max_chars:
+            current += (" " if current else "") + word
+        else:
+            if current:
+                chunks.append(current)
+            current = word
+    if current:
+        chunks.append(current)
+    return chunks
+
+
 # ---------------------------------------------------------------------------
 # Quiz Generation
 # ---------------------------------------------------------------------------
@@ -180,6 +398,7 @@ IMPORTANT INSTRUCTIONS:
 5. For short_answer: "correct_answer" must be a short answer (max 10 words).
 6. Explanations should be clear and educational.
 7. Match the language of the questions to the language of the source material.
+{extra_instructions}
 
 Respond with ONLY a valid JSON object in this exact format, with no other text:
 
@@ -192,7 +411,7 @@ Respond with ONLY a valid JSON object in this exact format, with no other text:
       "correct_answer": "Full text of the correct answer",
       "explanation": "Why this is correct",
       "source_chunk": "Citation from the material",
-      "difficulty": "easy|medium|hard"
+      "difficulty": "easy|medium|hard"{extra_field_doc}
     }}
   ]
 }}
@@ -200,10 +419,23 @@ Respond with ONLY a valid JSON object in this exact format, with no other text:
 For true_false and short_answer questions, set "options": null.
 """
 
+YOUTUBE_EXTRA_INSTRUCTIONS = """8. The material is a video transcript with [Ns] markers indicating the time in seconds where each part was spoken.
+9. For each question, include a "timestamp_seconds" field (integer) with the closest [Ns] marker BEFORE the part that justifies the answer. Always include this field for video material.
+10. Do NOT include the [Ns] markers in the source_chunk - clean them out for readability."""
 
-def generate_questions_from_chunk(chunk, num_questions, difficulty, types):
+YOUTUBE_EXTRA_FIELD_DOC = ',\n      "timestamp_seconds": 123'
+
+
+def generate_questions_from_chunk(chunk, num_questions, difficulty, types, is_youtube=False):
     types_str = ", ".join(types)
-    prompt = QUIZ_PROMPT.format(content=chunk, num_questions=num_questions, difficulty=difficulty, types=types_str)
+    prompt = QUIZ_PROMPT.format(
+        content=chunk,
+        num_questions=num_questions,
+        difficulty=difficulty,
+        types=types_str,
+        extra_instructions=YOUTUBE_EXTRA_INSTRUCTIONS if is_youtube else "",
+        extra_field_doc=YOUTUBE_EXTRA_FIELD_DOC if is_youtube else "",
+    )
     response = client.chat.completions.create(
         model=DEPLOYMENT,
         messages=[
@@ -222,8 +454,9 @@ def generate_questions_from_chunk(chunk, num_questions, difficulty, types):
     return data.get("questions", [])
 
 
-def build_quiz(text, num_questions, difficulty, types, title) -> Quiz:
-    chunks = chunk_text(text)
+def build_quiz(text, num_questions, difficulty, types, title, source_type="text", youtube_video_id=None) -> Quiz:
+    is_youtube = source_type == "youtube"
+    chunks = chunk_text_for_youtube(text) if is_youtube else chunk_text(text)
     if not chunks:
         raise HTTPException(status_code=400, detail="The material is empty.")
     n_chunks = min(len(chunks), num_questions)
@@ -235,31 +468,33 @@ def build_quiz(text, num_questions, difficulty, types, title) -> Quiz:
         n = per_chunk + (1 if i < remainder else 0)
         if n == 0:
             continue
-        all_questions.extend(generate_questions_from_chunk(chunk, n, difficulty, types))
+        all_questions.extend(generate_questions_from_chunk(chunk, n, difficulty, types, is_youtube=is_youtube))
     all_questions = all_questions[:num_questions]
-    questions = [
-        Question(
-            id=str(uuid.uuid4()),
-            type=q.get("type", "multiple_choice"),
-            question=q.get("question", ""),
-            options=q.get("options"),
-            correct_answer=q.get("correct_answer", ""),
-            explanation=q.get("explanation", ""),
-            source_chunk=q.get("source_chunk", ""),
-            difficulty=q.get("difficulty", "medium"),
-        )
-        for q in all_questions
-    ]
-    quiz_id = str(uuid.uuid4())
-    quiz = Quiz(
-        id=quiz_id,
-        title=title,
-        created_at=datetime.utcnow().isoformat(),
-        questions=questions,
-        source_text_preview=text[:300] + ("..." if len(text) > 300 else ""),
-    )
-    QUIZZES[quiz_id] = quiz
-    return quiz
+    questions_list = []
+    for q in all_questions:
+        questions_list.append({
+            "id": str(uuid.uuid4()),
+            "type": q.get("type", "multiple_choice"),
+            "question": q.get("question", ""),
+            "options": q.get("options"),
+            "correct_answer": q.get("correct_answer", ""),
+            "explanation": q.get("explanation", ""),
+            "source_chunk": q.get("source_chunk", ""),
+            "difficulty": q.get("difficulty", "medium"),
+            "timestamp_seconds": q.get("timestamp_seconds") if is_youtube else None,
+        })
+
+    quiz_dict = {
+        "id": str(uuid.uuid4()),
+        "title": title,
+        "created_at": datetime.utcnow().isoformat(),
+        "source_text_preview": text[:300] + ("..." if len(text) > 300 else ""),
+        "source_type": source_type,
+        "youtube_video_id": youtube_video_id,
+        "questions": questions_list,
+    }
+    save_quiz(quiz_dict)
+    return Quiz(**quiz_dict)
 
 
 # ---------------------------------------------------------------------------
@@ -274,6 +509,7 @@ When answering:
 - Keep answers focused and not overly long
 - If the student's question is unclear, ask a quick clarifying question
 - Match the language of your responses to the language the student uses
+- If the material contains [Ns] markers (these are video timestamps in seconds), you may reference them when helpful, e.g. "around 2:30 in the video"
 
 STUDY MATERIAL:
 \"\"\"
@@ -288,13 +524,11 @@ def build_chat_messages(req: ChatRequest):
         material = (req.context or "").strip()
         if not material:
             raise HTTPException(status_code=400, detail="Tutor mode requires study material.")
-        # Cap material length to keep prompt reasonable
         if len(material) > 25000:
             material = material[:25000] + "\n\n[truncated]"
         system = TUTOR_SYSTEM_PROMPT.format(material=material)
     else:
         system = GENERAL_SYSTEM_PROMPT
-
     messages = [{"role": "system", "content": system}]
     for m in req.messages:
         messages.append({"role": m.role, "content": m.content})
@@ -302,7 +536,6 @@ def build_chat_messages(req: ChatRequest):
 
 
 def stream_chat(messages):
-    """Generator that yields server-sent-events data chunks."""
     try:
         stream = client.chat.completions.create(
             model=DEPLOYMENT,
@@ -354,6 +587,18 @@ async def upload_pdf(file: UploadFile = File(...)):
     return {"text": text, "char_count": len(text)}
 
 
+@app.post("/api/youtube")
+def youtube_to_text(req: YouTubeRequest):
+    video_id = extract_youtube_id(req.url)
+    if not video_id:
+        raise HTTPException(status_code=400, detail="Invalid YouTube URL or video ID.")
+    text, _ = fetch_youtube_transcript(video_id)
+    if not text.strip():
+        raise HTTPException(status_code=400, detail="Transcript is empty.")
+    title = get_video_title(video_id)
+    return {"video_id": video_id, "title": title, "text": text, "char_count": len(text)}
+
+
 @app.post("/api/generate-quiz", response_model=Quiz)
 def generate_quiz(req: GenerateRequest, request: Request):
     check_quiz_rate_limit(request)
@@ -361,61 +606,66 @@ def generate_quiz(req: GenerateRequest, request: Request):
         raise HTTPException(status_code=400, detail="Text is empty.")
     if len(req.text) < 100:
         raise HTTPException(status_code=400, detail="Text is too short (minimum 100 characters).")
-    if len(req.text) > 30000:
-        raise HTTPException(status_code=400, detail="Text is too long (max 30,000 characters).")
+    if len(req.text) > 50000:
+        raise HTTPException(status_code=400, detail="Text is too long (max 50,000 characters).")
     return build_quiz(
         text=req.text,
         num_questions=req.num_questions,
         difficulty=req.difficulty,
         types=req.question_types,
         title=req.title or "Untitled Quiz",
+        source_type=req.source_type,
+        youtube_video_id=req.youtube_video_id,
     )
 
 
 @app.get("/api/quiz/{quiz_id}", response_model=Quiz)
 def get_quiz(quiz_id: str):
-    quiz = QUIZZES.get(quiz_id)
+    quiz = load_quiz(quiz_id)
     if not quiz:
         raise HTTPException(status_code=404, detail="Quiz not found.")
-    return quiz
+    return Quiz(**quiz)
 
 
 @app.post("/api/submit-quiz")
 def submit_quiz(req: SubmitQuizRequest):
-    quiz = QUIZZES.get(req.quiz_id)
+    quiz = load_quiz(req.quiz_id)
     if not quiz:
         raise HTTPException(status_code=404, detail="Quiz not found.")
     answers_map = {a.question_id: a.user_answer for a in req.answers}
     results, correct_count = [], 0
-    for q in quiz.questions:
-        user_ans = answers_map.get(q.id, "").strip()
-        is_correct = user_ans.lower() == q.correct_answer.strip().lower()
+    for q in quiz["questions"]:
+        user_ans = answers_map.get(q["id"], "").strip()
+        is_correct = user_ans.lower() == q["correct_answer"].strip().lower()
         if is_correct:
             correct_count += 1
         results.append({
-            "question_id": q.id, "question": q.question,
-            "user_answer": user_ans, "correct_answer": q.correct_answer,
-            "is_correct": is_correct, "explanation": q.explanation,
-            "source_chunk": q.source_chunk,
+            "question_id": q["id"], "question": q["question"],
+            "user_answer": user_ans, "correct_answer": q["correct_answer"],
+            "is_correct": is_correct, "explanation": q["explanation"],
+            "source_chunk": q["source_chunk"],
+            "timestamp_seconds": q.get("timestamp_seconds"),
         })
-    total = len(quiz.questions)
+    total = len(quiz["questions"])
     return {
         "quiz_id": req.quiz_id, "score": correct_count, "total": total,
         "percentage": round(100 * correct_count / total, 1) if total else 0,
         "results": results,
+        "youtube_video_id": quiz.get("youtube_video_id"),
     }
+
+
+@app.get("/api/quizzes")
+def list_quizzes():
+    return {"quizzes": list_all_quizzes()}
 
 
 @app.post("/api/chat")
 def chat(req: ChatRequest, request: Request):
-    """Streaming chat endpoint. Returns Server-Sent Events."""
     check_chat_rate_limit(request)
     messages = build_chat_messages(req)
     return StreamingResponse(
         stream_chat(messages),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",  # disable proxy buffering
-        },
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
