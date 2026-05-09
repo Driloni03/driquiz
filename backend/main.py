@@ -604,6 +604,75 @@ def youtube_to_text(req: YouTubeRequest):
     return {"video_id": video_id, "title": title, "text": text, "char_count": len(text)}
 
 
+class PastedTranscriptRequest(BaseModel):
+    url: str
+    transcript: str
+
+
+def parse_pasted_transcript(raw: str) -> str:
+    """
+    Convert YouTube's "Show transcript" pasted text into our [Ns] timestamp format.
+    YouTube transcript copy looks like:
+        0:00
+        Hello and welcome
+        0:12
+        Today we will discuss
+        1:23
+        ...
+
+    Or sometimes inline like "0:00 Hello and welcome 0:12 Today...".
+    Returns text with [Ns] markers our quiz prompt understands.
+    """
+    if not raw or not raw.strip():
+        return ""
+
+    # Split into lines, normalize whitespace
+    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+
+    # Detect timestamp lines like "0:00", "1:23", "12:34", "1:23:45"
+    ts_pattern = re.compile(r"^(\d+):(\d{2})(?::(\d{2}))?$")
+
+    parts = []
+    current_ts = 0
+    has_any_ts = False
+
+    for line in lines:
+        m = ts_pattern.match(line)
+        if m:
+            has_any_ts = True
+            groups = m.groups()
+            if groups[2] is not None:
+                # H:MM:SS
+                h, mn, s = int(groups[0]), int(groups[1]), int(groups[2])
+                current_ts = h * 3600 + mn * 60 + s
+            else:
+                mn, s = int(groups[0]), int(groups[1])
+                current_ts = mn * 60 + s
+            parts.append(f"[{current_ts}s]")
+        else:
+            parts.append(line)
+
+    if not has_any_ts:
+        # No timestamps found at all - just use the raw text
+        # Quiz will work but no timestamp jumping
+        return raw.strip()
+
+    return " ".join(parts)
+
+
+@app.post("/api/youtube-paste")
+def youtube_paste(req: PastedTranscriptRequest):
+    """Accept a pasted YouTube transcript with a video URL."""
+    video_id = extract_youtube_id(req.url)
+    if not video_id:
+        raise HTTPException(status_code=400, detail="Invalid YouTube URL or video ID.")
+    text = parse_pasted_transcript(req.transcript)
+    if not text or len(text) < 50:
+        raise HTTPException(status_code=400, detail="Transcript text is too short.")
+    title = get_video_title(video_id)
+    return {"video_id": video_id, "title": title, "text": text, "char_count": len(text)}
+
+
 @app.post("/api/generate-quiz", response_model=Quiz)
 def generate_quiz(req: GenerateRequest, request: Request):
     check_quiz_rate_limit(request)
@@ -663,6 +732,35 @@ def submit_quiz(req: SubmitQuizRequest):
 @app.get("/api/quizzes")
 def list_quizzes():
     return {"quizzes": list_all_quizzes()}
+
+
+@app.get("/api/quiz/{quiz_id}/public")
+def get_public_quiz(quiz_id: str):
+    """Get a quiz for someone who has the share link. Hides correct answers."""
+    quiz = load_quiz(quiz_id)
+    if not quiz:
+        raise HTTPException(status_code=404, detail="Quiz not found.")
+    # Return same shape as get_quiz but strip correct_answer/explanation/source_chunk
+    public_questions = []
+    for q in quiz["questions"]:
+        public_questions.append({
+            "id": q["id"],
+            "type": q["type"],
+            "question": q["question"],
+            "options": q.get("options"),
+            "difficulty": q.get("difficulty", "medium"),
+            "timestamp_seconds": q.get("timestamp_seconds"),
+            # Intentionally omit: correct_answer, explanation, source_chunk
+        })
+    return {
+        "id": quiz["id"],
+        "title": quiz["title"],
+        "created_at": quiz["created_at"],
+        "source_text_preview": quiz["source_text_preview"],
+        "source_type": quiz["source_type"],
+        "youtube_video_id": quiz["youtube_video_id"],
+        "questions": public_questions,
+    }
 
 
 @app.post("/api/chat")

@@ -1,6 +1,6 @@
 import axios from 'axios'
 
-const API_BASE = import.meta.env.VITE_API_URL || 'https://driquiz-api.onrender.com'
+const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
 const api = axios.create({
   baseURL: API_BASE,
@@ -21,6 +21,11 @@ export const fetchYoutubeTranscript = async (url) => {
   return data
 }
 
+export const pasteYoutubeTranscript = async (url, transcript) => {
+  const { data } = await api.post('/api/youtube-paste', { url, transcript })
+  return data
+}
+
 export const generateQuiz = async (payload) => {
   const { data } = await api.post('/api/generate-quiz', payload)
   return data
@@ -34,6 +39,21 @@ export const submitQuiz = async (quizId, answers) => {
   return data
 }
 
+export const getQuiz = async (quizId) => {
+  const { data } = await api.get(`/api/quiz/${quizId}`)
+  return data
+}
+
+export const getPublicQuiz = async (quizId) => {
+  const { data } = await api.get(`/api/quiz/${quizId}/public`)
+  return data
+}
+
+export const listQuizzes = async () => {
+  const { data } = await api.get('/api/quizzes')
+  return data.quizzes
+}
+
 export const streamChat = async ({ messages, mode, context, onDelta, signal }) => {
   const response = await fetch(`${API_BASE}/api/chat`, {
     method: 'POST',
@@ -41,28 +61,20 @@ export const streamChat = async ({ messages, mode, context, onDelta, signal }) =
     body: JSON.stringify({ messages, mode, context }),
     signal,
   })
-
   if (!response.ok) {
     let detail = `HTTP ${response.status}`
-    try {
-      const err = await response.json()
-      detail = err.detail || detail
-    } catch (_) {}
+    try { const err = await response.json(); detail = err.detail || detail } catch (_) {}
     throw new Error(detail)
   }
-
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
-
   while (true) {
     const { done, value } = await reader.read()
     if (done) break
     buffer += decoder.decode(value, { stream: true })
-
     const lines = buffer.split('\n')
     buffer = lines.pop() || ''
-
     for (const line of lines) {
       if (!line.startsWith('data: ')) continue
       const data = line.slice(6).trim()
@@ -78,7 +90,6 @@ export const streamChat = async ({ messages, mode, context, onDelta, signal }) =
   }
 }
 
-// Helper: format seconds as M:SS
 export const formatTimestamp = (seconds) => {
   if (seconds == null || isNaN(seconds)) return ''
   const m = Math.floor(seconds / 60)
@@ -86,7 +97,6 @@ export const formatTimestamp = (seconds) => {
   return `${m}:${String(s).padStart(2, '0')}`
 }
 
-// Helper: build YouTube link with timestamp
 export const youtubeLinkAt = (videoId, seconds) => {
   if (!videoId) return null
   const t = seconds != null ? Math.max(0, Math.floor(seconds)) : 0
