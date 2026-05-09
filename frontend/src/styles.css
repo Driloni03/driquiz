@@ -1594,3 +1594,382 @@ details summary:hover { color: var(--text); }
     transition-duration: 0.01ms !important;
   }
 }
+/* ============================================================
+   v3 STYLES — append to existing styles.css
+   ============================================================ */
+
+/* Step indicator */
+.step-indicator {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  margin-bottom: 1.5rem;
+}
+
+.step-dot {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: var(--bg-soft);
+  border: 2px solid var(--border);
+  color: var(--text-dim);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 0.85rem;
+  font-family: var(--font-mono);
+  transition: all var(--t-mid);
+}
+
+.step-dot.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+  box-shadow: 0 0 0 4px var(--accent-bg), 0 0 20px var(--accent-glow);
+  transform: scale(1.1);
+}
+
+.step-dot.done {
+  background: var(--accent-bg);
+  border-color: var(--accent);
+  color: var(--accent-light);
+}
+
+.step-line {
+  width: 50px;
+  height: 2px;
+  background: var(--border);
+  border-radius: 1px;
+}
+
+/* Sources list */
+.sources-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.source-chip {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.65rem 0.85rem;
+  transition: all var(--t-mid);
+  animation: fadeUp 0.3s ease-out;
+}
+
+.source-chip:hover { border-color: var(--accent-border); }
+
+.source-chip > svg {
+  color: var(--accent-light);
+  flex-shrink: 0;
+}
+
+.source-chip-info { flex: 1; min-width: 0; }
+
+.source-chip-label {
+  font-weight: 500;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.92rem;
+}
+
+.source-chip-meta {
+  font-size: 0.72rem;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+}
+
+.source-chip-remove {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 0.3rem;
+  border-radius: 6px;
+  display: flex;
+  transition: all var(--t-mid);
+  flex-shrink: 0;
+}
+
+.source-chip-remove:hover {
+  background: var(--error-bg);
+  color: var(--error);
+  transform: rotate(90deg);
+}
+
+/* Adder panel */
+.adder-panel {
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1rem;
+  animation: fadeUp 0.3s ease-out;
+}
+
+.adder-panel .tabs {
+  background: var(--surface);
+  margin-bottom: 1rem;
+}
+
+/* Concepts list */
+.concepts-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.concept-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  padding: 0.85rem 1rem;
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: all var(--t-mid);
+  animation: fadeUp 0.3s ease-out backwards;
+}
+
+.concept-item:nth-child(1) { animation-delay: 0.05s; }
+.concept-item:nth-child(2) { animation-delay: 0.1s; }
+.concept-item:nth-child(3) { animation-delay: 0.15s; }
+.concept-item:nth-child(4) { animation-delay: 0.2s; }
+.concept-item:nth-child(5) { animation-delay: 0.25s; }
+.concept-item:nth-child(n+6) { animation-delay: 0.3s; }
+
+.concept-item:hover {
+  border-color: var(--border-strong);
+  transform: translateX(2px);
+}
+
+.concept-item.checked {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+}
+
+.concept-item input {
+  margin-top: 0.2rem;
+  cursor: pointer;
+  accent-color: var(--accent);
+  flex-shrink: 0;
+}
+
+.concept-info { flex: 1; }
+
+.concept-name {
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 0.15rem;
+  font-size: 0.95rem;
+}
+
+.concept-desc {
+  font-size: 0.85rem;
+  color: var(--text-dim);
+  line-height: 1.45;
+}
+
+/* ELI5 button */
+.btn-ghost-small {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  padding: 0.4rem 0.75rem;
+  border-radius: 7px;
+  font-size: 0.78rem;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-top: 0.75rem;
+  transition: all var(--t-mid);
+}
+
+.btn-ghost-small:hover {
+  border-color: var(--accent);
+  color: var(--accent-light);
+  background: var(--accent-bg);
+}
+
+/* ELI5 box */
+.eli5-box {
+  margin-top: 0.75rem;
+  background: linear-gradient(135deg, var(--accent-bg) 0%, transparent 100%);
+  border: 1px solid var(--accent-border);
+  border-radius: var(--radius);
+  padding: 0.85rem 1rem;
+  animation: fadeUp 0.3s ease-out;
+}
+
+.eli5-header {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--accent-light);
+  margin-bottom: 0.5rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.eli5-text {
+  font-size: 0.92rem;
+  line-height: 1.55;
+  color: var(--text);
+}
+
+/* Modal */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(8, 6, 15, 0.7);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1100;
+  padding: 1rem;
+  animation: fadeIn 0.2s ease-out;
+}
+
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+.modal {
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  width: 100%;
+  max-width: 480px;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: var(--shadow-lg), 0 0 60px rgba(124, 58, 237, 0.15);
+  animation: chatSlideUp 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 1.1rem 1.25rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.modal-header h3 {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 1.15rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--text);
+}
+
+.modal-header h3 svg { color: var(--accent-light); }
+
+.modal-subtitle {
+  padding: 0 1.25rem;
+  margin-top: 0.5rem;
+  color: var(--text-dim);
+  font-size: 0.85rem;
+}
+
+.modal-body {
+  padding: 1rem 1.25rem 1.25rem;
+  overflow-y: auto;
+}
+
+/* Leaderboard */
+.leaderboard-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.leaderboard-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.65rem 0.85rem;
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  transition: all var(--t-mid);
+  animation: fadeUp 0.3s ease-out backwards;
+}
+
+.leaderboard-row:nth-child(1) { animation-delay: 0.05s; }
+.leaderboard-row:nth-child(2) { animation-delay: 0.1s; }
+.leaderboard-row:nth-child(3) { animation-delay: 0.15s; }
+.leaderboard-row:nth-child(n+4) { animation-delay: 0.2s; }
+
+.leaderboard-row:hover { border-color: var(--border-strong); }
+
+.leaderboard-row.me {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+  box-shadow: 0 0 0 1px var(--accent-bg);
+}
+
+.leaderboard-rank {
+  width: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.leaderboard-rank-num {
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  color: var(--text-dim);
+  font-weight: 600;
+}
+
+.leaderboard-name {
+  flex: 1;
+  font-weight: 500;
+  color: var(--text);
+  font-size: 0.92rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.leaderboard-me-tag {
+  font-size: 0.65rem;
+  background: var(--accent);
+  color: white;
+  padding: 0.1rem 0.4rem;
+  border-radius: 999px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.leaderboard-score {
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+}
+
+.leaderboard-score strong {
+  color: var(--accent-light);
+  font-weight: 700;
+}

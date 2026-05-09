@@ -1,7 +1,13 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useParams, Link } from 'react-router-dom'
-import { Loader2, CheckCircle2, XCircle, RotateCcw, BookOpen, Video, Clock, ArrowLeft } from 'lucide-react'
-import { getPublicQuiz, submitQuiz, formatTimestamp, youtubeLinkAt } from '../api'
+import {
+  Loader2, CheckCircle2, XCircle, RotateCcw, BookOpen, Video as Youtube,
+  Clock, ArrowLeft, Trophy, Share2, Lightbulb, X, Sparkles, Medal,
+} from 'lucide-react'
+import {
+  getPublicQuiz, submitToLeaderboard, getLeaderboard,
+  formatTimestamp, youtubeLinkAt, streamEli5, fireConfetti,
+} from '../api'
 
 const DIFFICULTY_LABELS = { easy: 'Easy', medium: 'Medium', hard: 'Hard', mixed: 'Mixed' }
 
@@ -10,13 +16,14 @@ export default function PublicQuiz() {
   const [quiz, setQuiz] = useState(null)
   const [answers, setAnswers] = useState({})
   const [results, setResults] = useState(null)
+  const [displayName, setDisplayName] = useState('')
   const [loading, setLoading] = useState(true)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
+  const [showLeaderboard, setShowLeaderboard] = useState(false)
+  const [copied, setCopied] = useState(false)
 
-  useEffect(() => {
-    loadQuiz()
-  }, [quizId])
+  useEffect(() => { loadQuiz() }, [quizId])
 
   const loadQuiz = async () => {
     setLoading(true)
@@ -31,7 +38,7 @@ export default function PublicQuiz() {
   }
 
   const handleAnswer = (qid, value) => {
-    setAnswers((prev) => ({ ...prev, [qid]: value }))
+    setAnswers(prev => ({ ...prev, [qid]: value }))
   }
 
   const handleSubmit = async () => {
@@ -41,13 +48,19 @@ export default function PublicQuiz() {
     setSubmitting(true)
     setError('')
     try {
-      const payload = quiz.questions.map((q) => ({
+      const payload = quiz.questions.map(q => ({
         question_id: q.id,
         user_answer: answers[q.id] || '',
       }))
-      const data = await submitQuiz(quiz.id, payload)
+      const data = await submitToLeaderboard(quiz.id, payload, displayName.trim() || null)
       setResults(data)
       window.scrollTo(0, 0)
+      // Confetti for high scores
+      if (data.percentage >= 80) {
+        fireConfetti('high')
+      } else if (data.percentage >= 60) {
+        fireConfetti('normal')
+      }
     } catch (err) {
       setError(err.response?.data?.detail || 'Error submitting quiz.')
     } finally {
@@ -58,7 +71,19 @@ export default function PublicQuiz() {
   const retake = () => {
     setAnswers({})
     setResults(null)
+    setShowLeaderboard(false)
     window.scrollTo(0, 0)
+  }
+
+  const copyShareLink = async () => {
+    const url = `${window.location.origin}/q/${quiz.id}`
+    try {
+      await navigator.clipboard.writeText(url)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    } catch (_) {
+      prompt('Copy link:', url)
+    }
   }
 
   if (loading) {
@@ -84,11 +109,11 @@ export default function PublicQuiz() {
   }
 
   const videoId = quiz.youtube_video_id
-  const answeredCount = Object.values(answers).filter((a) => a && a.trim()).length
+  const answeredCount = Object.values(answers).filter(a => a && a.trim()).length
 
-  // Results view
+  // ============= RESULTS VIEW =============
   if (results) {
-    const { score, total, percentage } = results
+    const { score, total, percentage, display_name } = results
     const message =
       percentage >= 80 ? '🎉 Excellent!' :
       percentage >= 60 ? '👍 Good job!' :
@@ -98,46 +123,27 @@ export default function PublicQuiz() {
         <div className="score-banner">
           <div className="score-number">{percentage}%</div>
           <div className="score-label">{score} out of {total} correct</div>
+          <div style={{ marginTop: '0.5rem', fontSize: '0.95rem', color: 'var(--accent-light)' }}>
+            <strong>{display_name}</strong> on the leaderboard
+          </div>
           <div style={{ marginTop: '1rem', fontSize: '1.1rem' }}>{message}</div>
         </div>
-        {results.results.map((r, idx) => {
-          const q = quiz.questions.find((x) => x.id === r.question_id)
-          return (
-            <div key={r.question_id} className={`question-card result-card ${r.is_correct ? 'correct' : 'incorrect'}`}>
-              <div className="question-header">
-                <span className="question-number">Question {idx + 1}</span>
-                <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
-                  <TimestampLink videoId={videoId} seconds={r.timestamp_seconds} />
-                  <div className={`result-icon ${r.is_correct ? 'correct' : 'incorrect'}`}>
-                    {r.is_correct ? <CheckCircle2 size={18} /> : <XCircle size={18} />}
-                    {r.is_correct ? 'Correct' : 'Incorrect'}
-                  </div>
-                </div>
-              </div>
-              <div className="question-text">{r.question}</div>
-              {q && q.options && (
-                <div>
-                  {q.options.map((opt, i) => {
-                    let cls = 'option'
-                    if (opt === r.correct_answer) cls += ' correct'
-                    else if (opt === r.user_answer && !r.is_correct) cls += ' incorrect'
-                    return <div key={i} className={cls}><span>{opt}</span></div>
-                  })}
-                </div>
-              )}
-              {q && !q.options && (
-                <>
-                  <div className="text-info" style={{ marginTop: '0.5rem' }}><strong>Your answer:</strong> {r.user_answer || '(blank)'}</div>
-                  <div className="text-info"><strong>Correct answer:</strong> {r.correct_answer}</div>
-                </>
-              )}
-              <div className="explanation">
-                <strong>Explanation:</strong> {r.explanation}
-                {r.source_chunk && <div className="source-quote">"{r.source_chunk}"</div>}
-              </div>
-            </div>
-          )
-        })}
+
+        <div className="button-row" style={{ marginBottom: '1.5rem', justifyContent: 'center' }}>
+          <button className="btn btn-secondary" onClick={() => setShowLeaderboard(true)}>
+            <Trophy size={16} /> View Leaderboard
+          </button>
+          <button className="btn btn-secondary" onClick={copyShareLink}>
+            <Share2 size={16} /> {copied ? 'Copied!' : 'Share'}
+          </button>
+        </div>
+
+        {showLeaderboard && <LeaderboardModal quizId={quiz.id} myName={display_name} onClose={() => setShowLeaderboard(false)} />}
+
+        {results.results.map((r, idx) => (
+          <ResultCard key={r.question_id} result={r} idx={idx} quiz={quiz} videoId={videoId} />
+        ))}
+
         <div className="button-row">
           <button className="btn" onClick={retake}><RotateCcw size={18} /> Try Again</button>
           <Link to="/app" className="btn btn-secondary">Create Your Own Quiz</Link>
@@ -146,7 +152,7 @@ export default function PublicQuiz() {
     )
   }
 
-  // Quiz-taking view
+  // ============= QUIZ-TAKING VIEW =============
   return (
     <div className="container">
       <div className="card">
@@ -154,12 +160,36 @@ export default function PublicQuiz() {
           <BookOpen size={20} /> {quiz.title}
           {quiz.source_type === 'youtube' && (
             <span className="badge badge-medium" style={{ marginLeft: '0.5rem' }}>
-              <Video size={12} style={{ verticalAlign: 'middle', marginRight: 3 }} /> YouTube
+              <Youtube size={12} style={{ verticalAlign: 'middle', marginRight: 3 }} /> YouTube
             </span>
           )}
         </h2>
-        <div className="text-info">{answeredCount} / {quiz.questions.length} answered · Shared quiz</div>
+        <div className="text-info" style={{ marginBottom: '0.85rem' }}>
+          {answeredCount} / {quiz.questions.length} answered
+        </div>
+
+        <div className="field">
+          <label className="label">Your name (optional, for leaderboard)</label>
+          <input
+            className="input"
+            placeholder="Leave blank for a random animal name"
+            value={displayName}
+            onChange={(e) => setDisplayName(e.target.value)}
+            maxLength={40}
+          />
+        </div>
+
+        <div className="button-row">
+          <button className="btn btn-secondary btn-small" onClick={() => setShowLeaderboard(true)}>
+            <Trophy size={14} /> View Leaderboard
+          </button>
+          <button className="btn btn-secondary btn-small" onClick={copyShareLink}>
+            <Share2 size={14} /> {copied ? 'Copied!' : 'Share Quiz'}
+          </button>
+        </div>
       </div>
+
+      {showLeaderboard && <LeaderboardModal quizId={quiz.id} onClose={() => setShowLeaderboard(false)} />}
 
       {quiz.questions.map((q, idx) => (
         <div key={q.id} className="question-card">
@@ -183,7 +213,7 @@ export default function PublicQuiz() {
           )}
           {q.type === 'true_false' && (
             <div>
-              {['True', 'False'].map((opt) => (
+              {['True', 'False'].map(opt => (
                 <label key={opt} className={`option ${answers[q.id] === opt ? 'selected' : ''}`}>
                   <input type="radio" name={q.id} checked={answers[q.id] === opt} onChange={() => handleAnswer(q.id, opt)} />
                   <span>{opt}</span>
@@ -207,11 +237,154 @@ export default function PublicQuiz() {
   )
 }
 
+/* ============================================================
+   ResultCard with ELI5 button
+   ============================================================ */
+function ResultCard({ result: r, idx, quiz, videoId }) {
+  const q = quiz.questions.find(x => x.id === r.question_id)
+  const [eli5, setEli5] = useState('')
+  const [eli5Loading, setEli5Loading] = useState(false)
+  const abortRef = useRef(null)
+
+  const askEli5 = async () => {
+    if (eli5Loading) return
+    setEli5Loading(true)
+    setEli5('')
+    abortRef.current = new AbortController()
+    try {
+      await streamEli5({
+        question: r.question,
+        answer: r.correct_answer,
+        original_explanation: r.explanation,
+        signal: abortRef.current.signal,
+        onDelta: (delta) => setEli5(prev => prev + delta),
+      })
+    } catch (err) {
+      if (err.name !== 'AbortError') setEli5('Error: ' + err.message)
+    } finally {
+      setEli5Loading(false)
+    }
+  }
+
+  return (
+    <div className={`question-card result-card ${r.is_correct ? 'correct' : 'incorrect'}`}>
+      <div className="question-header">
+        <span className="question-number">Question {idx + 1}</span>
+        <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+          <TimestampLink videoId={videoId} seconds={r.timestamp_seconds} />
+          <div className={`result-icon ${r.is_correct ? 'correct' : 'incorrect'}`}>
+            {r.is_correct ? <CheckCircle2 size={18} /> : <XCircle size={18} />}
+            {r.is_correct ? 'Correct' : 'Incorrect'}
+          </div>
+        </div>
+      </div>
+      <div className="question-text">{r.question}</div>
+      {q && q.options && (
+        <div>
+          {q.options.map((opt, i) => {
+            let cls = 'option'
+            if (opt === r.correct_answer) cls += ' correct'
+            else if (opt === r.user_answer && !r.is_correct) cls += ' incorrect'
+            return <div key={i} className={cls}><span>{opt}</span></div>
+          })}
+        </div>
+      )}
+      {q && !q.options && (
+        <>
+          <div className="text-info" style={{ marginTop: '0.5rem' }}><strong>Your answer:</strong> {r.user_answer || '(blank)'}</div>
+          <div className="text-info"><strong>Correct answer:</strong> {r.correct_answer}</div>
+        </>
+      )}
+      <div className="explanation">
+        <strong>Explanation:</strong> {r.explanation}
+        {r.source_chunk && <div className="source-quote">"{r.source_chunk}"</div>}
+      </div>
+
+      {!eli5 && !eli5Loading && (
+        <button className="btn-ghost-small" onClick={askEli5}>
+          <Lightbulb size={13} /> Explain like I'm 5
+        </button>
+      )}
+
+      {(eli5 || eli5Loading) && (
+        <div className="eli5-box">
+          <div className="eli5-header">
+            <Lightbulb size={14} /> Simpler explanation
+            {eli5Loading && <Loader2 size={12} className="spinner" />}
+          </div>
+          <div className="eli5-text">{eli5}</div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/* ============================================================
+   Leaderboard modal
+   ============================================================ */
+function LeaderboardModal({ quizId, myName, onClose }) {
+  const [entries, setEntries] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [title, setTitle] = useState('')
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const data = await getLeaderboard(quizId)
+        setEntries(data.entries)
+        setTitle(data.title)
+      } catch (_) {}
+      setLoading(false)
+    })()
+  }, [quizId])
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <h3><Trophy size={18} /> Leaderboard</h3>
+          <button className="chat-close" onClick={onClose}><X size={18} /></button>
+        </div>
+        <div className="modal-subtitle">{title}</div>
+        <div className="modal-body">
+          {loading && <div className="center-text"><Loader2 size={20} className="spinner" /></div>}
+          {!loading && entries.length === 0 && (
+            <p className="text-info center-text">No entries yet. Be the first!</p>
+          )}
+          {!loading && entries.length > 0 && (
+            <ol className="leaderboard-list">
+              {entries.map((e, idx) => {
+                const isMe = myName && e.display_name === myName
+                return (
+                  <li key={idx} className={`leaderboard-row ${isMe ? 'me' : ''}`}>
+                    <div className="leaderboard-rank">
+                      {idx === 0 && <Medal size={16} style={{ color: '#fbbf24' }} />}
+                      {idx === 1 && <Medal size={16} style={{ color: '#d4d0e0' }} />}
+                      {idx === 2 && <Medal size={16} style={{ color: '#cd7f32' }} />}
+                      {idx > 2 && <span className="leaderboard-rank-num">{idx + 1}</span>}
+                    </div>
+                    <div className="leaderboard-name">
+                      {e.display_name}
+                      {isMe && <span className="leaderboard-me-tag">you</span>}
+                    </div>
+                    <div className="leaderboard-score">
+                      <strong>{e.percentage}%</strong> <span className="text-info">({e.score}/{e.total})</span>
+                    </div>
+                  </li>
+                )
+              })}
+            </ol>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function TimestampLink({ videoId, seconds }) {
   if (videoId == null || seconds == null) return null
-  const url = youtubeLinkAt(videoId, seconds)
   return (
-    <a className="timestamp-link" href={url} target="_blank" rel="noopener noreferrer" title="Open at this timestamp">
+    <a className="timestamp-link" href={youtubeLinkAt(videoId, seconds)} target="_blank" rel="noopener noreferrer">
       <Clock size={13} /> {formatTimestamp(seconds)}
     </a>
   )

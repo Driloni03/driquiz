@@ -1,11 +1,13 @@
 """
-Quiz Generator API - FastAPI backend (with resilient YouTube transcript fetching)
+DriQuiz API - FastAPI backend
+v1.4.0: + concept extraction, ELI5, leaderboard, multi-source quizzes
 """
 import os
 import re
 import json
 import uuid
 import time
+import random
 import sqlite3
 from contextlib import contextmanager
 from typing import List, Optional, Literal
@@ -22,11 +24,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-app = FastAPI(title="Quiz Generator API", version="1.3.1")
+app = FastAPI(title="DriQuiz API", version="1.4.0")
 
 ALLOWED_ORIGINS = os.getenv(
     "ALLOWED_ORIGINS",
-    "http://localhost:5173,http://localhost:3000,http://localhost:5174",
+    "http://localhost:5173,http://localhost:5174,http://localhost:5175,http://localhost:3000",
 ).split(",")
 
 app.add_middleware(
@@ -45,7 +47,7 @@ client = AzureOpenAI(
 DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT")
 
 # ---------------------------------------------------------------------------
-# SQLite setup
+# SQLite
 # ---------------------------------------------------------------------------
 DB_PATH = os.getenv("DB_PATH", "quizzes.db")
 
@@ -62,8 +64,7 @@ def get_db():
 
 def init_db():
     with get_db() as conn:
-        conn.execute(
-            """
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS quizzes (
                 id TEXT PRIMARY KEY,
                 title TEXT NOT NULL,
@@ -73,11 +74,25 @@ def init_db():
                 youtube_video_id TEXT,
                 questions_json TEXT NOT NULL
             )
-            """
-        )
-        for col, sql in [
-            ("source_type", "ALTER TABLE quizzes ADD COLUMN source_type TEXT DEFAULT 'text'"),
-            ("youtube_video_id", "ALTER TABLE quizzes ADD COLUMN youtube_video_id TEXT"),
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS leaderboard (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                quiz_id TEXT NOT NULL,
+                display_name TEXT NOT NULL,
+                score INTEGER NOT NULL,
+                total INTEGER NOT NULL,
+                percentage REAL NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (quiz_id) REFERENCES quizzes(id)
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_leaderboard_quiz ON leaderboard(quiz_id, percentage DESC)")
+
+        # Migrate older DBs
+        for sql in [
+            "ALTER TABLE quizzes ADD COLUMN source_type TEXT DEFAULT 'text'",
+            "ALTER TABLE quizzes ADD COLUMN youtube_video_id TEXT",
         ]:
             try:
                 conn.execute(sql)
@@ -141,10 +156,47 @@ def list_all_quizzes():
         ]
 
 
+def save_leaderboard_entry(quiz_id, display_name, score, total, percentage):
+    with get_db() as conn:
+        conn.execute(
+            "INSERT INTO leaderboard (quiz_id, display_name, score, total, percentage, created_at) VALUES (?,?,?,?,?,?)",
+            (quiz_id, display_name, score, total, percentage, datetime.utcnow().isoformat()),
+        )
+        conn.commit()
+
+
+def get_leaderboard(quiz_id):
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT display_name, score, total, percentage, created_at FROM leaderboard WHERE quiz_id = ? ORDER BY percentage DESC, created_at ASC LIMIT 50",
+            (quiz_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Random animal names for anonymous leaderboard
+# ---------------------------------------------------------------------------
+ADJECTIVES = [
+    "Brave", "Clever", "Sneaky", "Mighty", "Swift", "Wise", "Curious", "Daring",
+    "Gentle", "Loyal", "Bold", "Witty", "Calm", "Bright", "Lucky", "Quick",
+    "Sleepy", "Happy", "Fierce", "Quiet", "Sunny", "Rusty", "Smooth", "Wild",
+]
+ANIMALS = [
+    "Otter", "Fox", "Owl", "Wolf", "Bear", "Hawk", "Tiger", "Panda",
+    "Lynx", "Falcon", "Raven", "Badger", "Eagle", "Lion", "Cobra", "Penguin",
+    "Dolphin", "Koala", "Sloth", "Cheetah", "Heron", "Moose", "Rabbit", "Crane",
+]
+
+
+def random_animal_name() -> str:
+    return f"{random.choice(ADJECTIVES)} {random.choice(ANIMALS)}"
+
+
 # ---------------------------------------------------------------------------
 # Rate limiting
 # ---------------------------------------------------------------------------
-RATE_LIMIT_REQUESTS = int(os.getenv("RATE_LIMIT_REQUESTS", "5"))
+RATE_LIMIT_REQUESTS = int(os.getenv("RATE_LIMIT_REQUESTS", "10"))
 RATE_LIMIT_WINDOW_SEC = int(os.getenv("RATE_LIMIT_WINDOW_SEC", "3600"))
 CHAT_RATE_LIMIT = int(os.getenv("CHAT_RATE_LIMIT", "30"))
 _quiz_log = defaultdict(deque)
@@ -205,12 +257,28 @@ class GenerateRequest(BaseModel):
     difficulty: Literal["easy", "medium", "hard", "mixed"] = "mixed"
     question_types: List[Literal["multiple_choice", "true_false", "short_answer"]] = ["multiple_choice"]
     title: Optional[str] = "Untitled Quiz"
-    source_type: Literal["text", "pdf", "youtube"] = "text"
+    source_type: Literal["text", "pdf", "youtube", "multi"] = "text"
     youtube_video_id: Optional[str] = None
+    focus_concepts: Optional[List[str]] = None
 
 
 class YouTubeRequest(BaseModel):
     url: str
+
+
+class PastedTranscriptRequest(BaseModel):
+    url: str
+    transcript: str
+
+
+class ConceptsRequest(BaseModel):
+    text: str = Field(..., min_length=100)
+
+
+class ELI5Request(BaseModel):
+    question: str
+    answer: str
+    original_explanation: str
 
 
 class AnswerSubmission(BaseModel):
@@ -221,6 +289,12 @@ class AnswerSubmission(BaseModel):
 class SubmitQuizRequest(BaseModel):
     quiz_id: str
     answers: List[AnswerSubmission]
+
+
+class LeaderboardSubmitRequest(BaseModel):
+    quiz_id: str
+    answers: List[AnswerSubmission]
+    display_name: Optional[str] = None  # if None, generate random animal
 
 
 class ChatMessage(BaseModel):
@@ -235,7 +309,7 @@ class ChatRequest(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# YouTube — supports both 0.6.x and 1.x library versions
+# YouTube
 # ---------------------------------------------------------------------------
 YOUTUBE_ID_PATTERNS = [
     r"(?:v=|/v/|youtu\.be/|/embed/|/shorts/)([0-9A-Za-z_-]{11})",
@@ -264,66 +338,46 @@ def get_video_title(video_id: str) -> str:
 
 
 def _build_ytt_client():
-    """Create a YouTubeTranscriptApi client, with Webshare proxy if configured."""
     from youtube_transcript_api import YouTubeTranscriptApi
     proxy_user = os.getenv("WEBSHARE_PROXY_USERNAME")
     proxy_pass = os.getenv("WEBSHARE_PROXY_PASSWORD")
-    print(f"[YT] proxy_user set: {bool(proxy_user)}, proxy_pass set: {bool(proxy_pass)}", flush=True)
     if proxy_user and proxy_pass:
         try:
             from youtube_transcript_api.proxies import WebshareProxyConfig
-            print(f"[YT] Using Webshare proxy (user starts with: {proxy_user[:6]}...)", flush=True)
             return YouTubeTranscriptApi(proxy_config=WebshareProxyConfig(
                 proxy_username=proxy_user,
                 proxy_password=proxy_pass,
             ))
-        except ImportError as e:
-            print(f"[YT] WebshareProxyConfig import failed: {e}", flush=True)
-    print("[YT] No proxy - using direct connection", flush=True)
+        except ImportError:
+            pass
     return YouTubeTranscriptApi()
 
 
 def fetch_youtube_transcript(video_id: str) -> tuple[str, list]:
-    """
-    Transcript fetcher using youtube-transcript-api v1.x with optional Webshare proxy.
-    Returns:
-      - transcript_text: text with [Ns] timestamps inline
-      - segments: list of {text, start, duration}
-    """
     languages = ["en", "sq", "es", "fr", "de", "it", "sr", "hr", "mk"]
     segments = None
     last_err = None
-
     try:
         ytt = _build_ytt_client()
         try:
             fetched = ytt.fetch(video_id, languages=languages)
-        except Exception as inner:
-            print(f"[YT] First fetch attempt failed: {inner}", flush=True)
+        except Exception:
             fetched = ytt.fetch(video_id)
         try:
-            segments = [
-                {"text": s.text, "start": s.start, "duration": s.duration}
-                for s in fetched
-            ]
+            segments = [{"text": s.text, "start": s.start, "duration": s.duration} for s in fetched]
         except Exception:
             segments = fetched.to_raw_data() if hasattr(fetched, "to_raw_data") else None
     except Exception as e:
         last_err = e
-        print(f"[YT] Fetch failed entirely: {type(e).__name__}: {e}", flush=True)
 
     if not segments:
         msg = str(last_err) if last_err else "Unknown error"
-        # Make common errors more friendly
         if "TranscriptsDisabled" in msg or "transcripts are disabled" in msg.lower():
             raise HTTPException(status_code=400, detail="This video has transcripts disabled.")
         if "VideoUnavailable" in msg or "unavailable" in msg.lower():
             raise HTTPException(status_code=400, detail="Video unavailable or private.")
-        if "NoTranscriptFound" in msg or "no transcript" in msg.lower():
-            raise HTTPException(status_code=400, detail="No transcript available for this video.")
         raise HTTPException(status_code=400, detail=f"Could not fetch transcript: {msg}")
 
-    # Build text with [Ns] markers every ~25 seconds
     parts, last_marker = [], -999
     for seg in segments:
         start = int(seg["start"])
@@ -331,8 +385,33 @@ def fetch_youtube_transcript(video_id: str) -> tuple[str, list]:
             parts.append(f"[{start}s]")
             last_marker = start
         parts.append(seg["text"].replace("\n", " "))
-    text = " ".join(parts)
-    return text, segments
+    return " ".join(parts), segments
+
+
+def parse_pasted_transcript(raw: str) -> str:
+    if not raw or not raw.strip():
+        return ""
+    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+    ts_pattern = re.compile(r"^(\d+):(\d{2})(?::(\d{2}))?$")
+    parts = []
+    has_any_ts = False
+    for line in lines:
+        m = ts_pattern.match(line)
+        if m:
+            has_any_ts = True
+            groups = m.groups()
+            if groups[2] is not None:
+                h, mn, s = int(groups[0]), int(groups[1]), int(groups[2])
+                current_ts = h * 3600 + mn * 60 + s
+            else:
+                mn, s = int(groups[0]), int(groups[1])
+                current_ts = mn * 60 + s
+            parts.append(f"[{current_ts}s]")
+        else:
+            parts.append(line)
+    if not has_any_ts:
+        return raw.strip()
+    return " ".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -381,6 +460,51 @@ def chunk_text_for_youtube(text: str, max_chars: int = 4000) -> List[str]:
 
 
 # ---------------------------------------------------------------------------
+# Concept extraction
+# ---------------------------------------------------------------------------
+def extract_concepts(text: str) -> List[dict]:
+    """Use the LLM to extract 5-8 main concepts from study material."""
+    # Use a sample of the text if very long
+    sample = text[:8000] if len(text) > 8000 else text
+
+    prompt = f"""Analyze this study material and identify the 5-8 main concepts/topics it covers.
+
+MATERIAL:
+\"\"\"
+{sample}
+\"\"\"
+
+Return ONLY a JSON object in this format:
+{{
+  "concepts": [
+    {{
+      "name": "Short topic name (2-5 words)",
+      "description": "One-sentence description of what this covers"
+    }}
+  ]
+}}
+
+Identify 5-8 distinct concepts. Use the language of the material."""
+
+    response = client.chat.completions.create(
+        model=DEPLOYMENT,
+        messages=[
+            {"role": "system", "content": "You analyze study material and return valid JSON only."},
+            {"role": "user", "content": prompt},
+        ],
+        response_format={"type": "json_object"},
+        temperature=0.3,
+        max_tokens=1024,
+    )
+    raw = response.choices[0].message.content.strip()
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=500, detail="Could not extract concepts.")
+    return data.get("concepts", [])
+
+
+# ---------------------------------------------------------------------------
 # Quiz Generation
 # ---------------------------------------------------------------------------
 QUIZ_PROMPT = """You are an expert at creating educational quiz questions. Generate a quiz from the provided learning material.
@@ -394,7 +518,7 @@ REQUIREMENTS:
 - Number of questions: {num_questions}
 - Difficulty: {difficulty}
 - Allowed question types: {types}
-
+{focus_block}
 IMPORTANT INSTRUCTIONS:
 1. Questions must be based ONLY on the provided material - do not invent information.
 2. Each question must include a "source_chunk" that is a short citation (1-2 sentences) from the material justifying the correct answer.
@@ -425,19 +549,25 @@ For true_false and short_answer questions, set "options": null.
 """
 
 YOUTUBE_EXTRA_INSTRUCTIONS = """8. The material is a video transcript with [Ns] markers indicating the time in seconds where each part was spoken.
-9. For each question, include a "timestamp_seconds" field (integer) with the closest [Ns] marker BEFORE the part that justifies the answer. Always include this field for video material.
+9. For each question, include a "timestamp_seconds" field (integer) with the closest [Ns] marker BEFORE the part that justifies the answer.
 10. Do NOT include the [Ns] markers in the source_chunk - clean them out for readability."""
 
 YOUTUBE_EXTRA_FIELD_DOC = ',\n      "timestamp_seconds": 123'
 
 
-def generate_questions_from_chunk(chunk, num_questions, difficulty, types, is_youtube=False):
+def generate_questions_from_chunk(chunk, num_questions, difficulty, types, is_youtube=False, focus_concepts=None):
     types_str = ", ".join(types)
+    focus_block = ""
+    if focus_concepts:
+        concepts_str = ", ".join(f'"{c}"' for c in focus_concepts)
+        focus_block = f"- FOCUS on these concepts: {concepts_str}\n"
+
     prompt = QUIZ_PROMPT.format(
         content=chunk,
         num_questions=num_questions,
         difficulty=difficulty,
         types=types_str,
+        focus_block=focus_block,
         extra_instructions=YOUTUBE_EXTRA_INSTRUCTIONS if is_youtube else "",
         extra_field_doc=YOUTUBE_EXTRA_FIELD_DOC if is_youtube else "",
     )
@@ -455,11 +585,12 @@ def generate_questions_from_chunk(chunk, num_questions, difficulty, types, is_yo
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as e:
-        raise HTTPException(status_code=500, detail=f"LLM returned invalid JSON: {e}. Raw: {raw[:200]}")
+        raise HTTPException(status_code=500, detail=f"LLM returned invalid JSON: {e}")
     return data.get("questions", [])
 
 
-def build_quiz(text, num_questions, difficulty, types, title, source_type="text", youtube_video_id=None) -> Quiz:
+def build_quiz(text, num_questions, difficulty, types, title, source_type="text",
+               youtube_video_id=None, focus_concepts=None) -> Quiz:
     is_youtube = source_type == "youtube"
     chunks = chunk_text_for_youtube(text) if is_youtube else chunk_text(text)
     if not chunks:
@@ -473,7 +604,10 @@ def build_quiz(text, num_questions, difficulty, types, title, source_type="text"
         n = per_chunk + (1 if i < remainder else 0)
         if n == 0:
             continue
-        all_questions.extend(generate_questions_from_chunk(chunk, n, difficulty, types, is_youtube=is_youtube))
+        all_questions.extend(generate_questions_from_chunk(
+            chunk, n, difficulty, types,
+            is_youtube=is_youtube, focus_concepts=focus_concepts,
+        ))
     all_questions = all_questions[:num_questions]
     questions_list = []
     for q in all_questions:
@@ -503,7 +637,7 @@ def build_quiz(text, num_questions, difficulty, types, title, source_type="text"
 
 
 # ---------------------------------------------------------------------------
-# Chat
+# Chat & ELI5
 # ---------------------------------------------------------------------------
 TUTOR_SYSTEM_PROMPT = """You are a friendly, patient study tutor. The student has provided study material below. Use it as the primary source for your answers.
 
@@ -563,12 +697,47 @@ def stream_chat(messages):
         yield "data: [DONE]\n\n"
 
 
+def stream_eli5(question, answer, original_explanation):
+    """Stream a simpler explanation."""
+    prompt = f"""A student got this question:
+
+Q: {question}
+A: {answer}
+
+The original explanation was: "{original_explanation}"
+
+Re-explain this in extremely simple terms, like you're talking to a 10-year-old. Use a short analogy or everyday example. Keep it under 4 sentences. Match the language of the original."""
+
+    try:
+        stream = client.chat.completions.create(
+            model=DEPLOYMENT,
+            messages=[
+                {"role": "system", "content": "You explain things simply and clearly."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.7,
+            max_tokens=400,
+            stream=True,
+        )
+        for chunk in stream:
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
+            if delta and delta.content:
+                payload = json.dumps({"delta": delta.content})
+                yield f"data: {payload}\n\n"
+        yield "data: [DONE]\n\n"
+    except Exception as e:
+        yield f"data: {json.dumps({'error': str(e)})}\n\n"
+        yield "data: [DONE]\n\n"
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
 @app.get("/")
 def root():
-    return {"status": "ok", "service": "Quiz Generator API"}
+    return {"status": "ok", "service": "DriQuiz API", "version": "1.4.0"}
 
 
 @app.get("/health")
@@ -588,15 +757,15 @@ async def upload_pdf(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Could not read PDF: {e}")
     if not text.strip():
-        raise HTTPException(status_code=400, detail="PDF contains no readable text (it may be scanned).")
-    return {"text": text, "char_count": len(text)}
+        raise HTTPException(status_code=400, detail="PDF contains no readable text.")
+    return {"text": text, "char_count": len(text), "filename": file.filename}
 
 
 @app.post("/api/youtube")
 def youtube_to_text(req: YouTubeRequest):
     video_id = extract_youtube_id(req.url)
     if not video_id:
-        raise HTTPException(status_code=400, detail="Invalid YouTube URL or video ID.")
+        raise HTTPException(status_code=400, detail="Invalid YouTube URL.")
     text, _ = fetch_youtube_transcript(video_id)
     if not text.strip():
         raise HTTPException(status_code=400, detail="Transcript is empty.")
@@ -604,68 +773,11 @@ def youtube_to_text(req: YouTubeRequest):
     return {"video_id": video_id, "title": title, "text": text, "char_count": len(text)}
 
 
-class PastedTranscriptRequest(BaseModel):
-    url: str
-    transcript: str
-
-
-def parse_pasted_transcript(raw: str) -> str:
-    """
-    Convert YouTube's "Show transcript" pasted text into our [Ns] timestamp format.
-    YouTube transcript copy looks like:
-        0:00
-        Hello and welcome
-        0:12
-        Today we will discuss
-        1:23
-        ...
-
-    Or sometimes inline like "0:00 Hello and welcome 0:12 Today...".
-    Returns text with [Ns] markers our quiz prompt understands.
-    """
-    if not raw or not raw.strip():
-        return ""
-
-    # Split into lines, normalize whitespace
-    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
-
-    # Detect timestamp lines like "0:00", "1:23", "12:34", "1:23:45"
-    ts_pattern = re.compile(r"^(\d+):(\d{2})(?::(\d{2}))?$")
-
-    parts = []
-    current_ts = 0
-    has_any_ts = False
-
-    for line in lines:
-        m = ts_pattern.match(line)
-        if m:
-            has_any_ts = True
-            groups = m.groups()
-            if groups[2] is not None:
-                # H:MM:SS
-                h, mn, s = int(groups[0]), int(groups[1]), int(groups[2])
-                current_ts = h * 3600 + mn * 60 + s
-            else:
-                mn, s = int(groups[0]), int(groups[1])
-                current_ts = mn * 60 + s
-            parts.append(f"[{current_ts}s]")
-        else:
-            parts.append(line)
-
-    if not has_any_ts:
-        # No timestamps found at all - just use the raw text
-        # Quiz will work but no timestamp jumping
-        return raw.strip()
-
-    return " ".join(parts)
-
-
 @app.post("/api/youtube-paste")
 def youtube_paste(req: PastedTranscriptRequest):
-    """Accept a pasted YouTube transcript with a video URL."""
     video_id = extract_youtube_id(req.url)
     if not video_id:
-        raise HTTPException(status_code=400, detail="Invalid YouTube URL or video ID.")
+        raise HTTPException(status_code=400, detail="Invalid YouTube URL.")
     text = parse_pasted_transcript(req.transcript)
     if not text or len(text) < 50:
         raise HTTPException(status_code=400, detail="Transcript text is too short.")
@@ -673,15 +785,22 @@ def youtube_paste(req: PastedTranscriptRequest):
     return {"video_id": video_id, "title": title, "text": text, "char_count": len(text)}
 
 
+@app.post("/api/extract-concepts")
+def api_extract_concepts(req: ConceptsRequest, request: Request):
+    check_quiz_rate_limit(request)
+    if len(req.text) > 50000:
+        raise HTTPException(status_code=400, detail="Text too long (max 50,000 chars).")
+    concepts = extract_concepts(req.text)
+    return {"concepts": concepts}
+
+
 @app.post("/api/generate-quiz", response_model=Quiz)
 def generate_quiz(req: GenerateRequest, request: Request):
     check_quiz_rate_limit(request)
-    if not req.text.strip():
-        raise HTTPException(status_code=400, detail="Text is empty.")
-    if len(req.text) < 100:
-        raise HTTPException(status_code=400, detail="Text is too short (minimum 100 characters).")
+    if not req.text.strip() or len(req.text) < 100:
+        raise HTTPException(status_code=400, detail="Text too short (min 100 chars).")
     if len(req.text) > 50000:
-        raise HTTPException(status_code=400, detail="Text is too long (max 50,000 characters).")
+        raise HTTPException(status_code=400, detail="Text too long (max 50,000 chars).")
     return build_quiz(
         text=req.text,
         num_questions=req.num_questions,
@@ -690,6 +809,7 @@ def generate_quiz(req: GenerateRequest, request: Request):
         title=req.title or "Untitled Quiz",
         source_type=req.source_type,
         youtube_video_id=req.youtube_video_id,
+        focus_concepts=req.focus_concepts,
     )
 
 
@@ -701,12 +821,34 @@ def get_quiz(quiz_id: str):
     return Quiz(**quiz)
 
 
-@app.post("/api/submit-quiz")
-def submit_quiz(req: SubmitQuizRequest):
-    quiz = load_quiz(req.quiz_id)
+@app.get("/api/quiz/{quiz_id}/public")
+def get_public_quiz(quiz_id: str):
+    quiz = load_quiz(quiz_id)
     if not quiz:
         raise HTTPException(status_code=404, detail="Quiz not found.")
-    answers_map = {a.question_id: a.user_answer for a in req.answers}
+    public_questions = []
+    for q in quiz["questions"]:
+        public_questions.append({
+            "id": q["id"],
+            "type": q["type"],
+            "question": q["question"],
+            "options": q.get("options"),
+            "difficulty": q.get("difficulty", "medium"),
+            "timestamp_seconds": q.get("timestamp_seconds"),
+        })
+    return {
+        "id": quiz["id"],
+        "title": quiz["title"],
+        "created_at": quiz["created_at"],
+        "source_text_preview": quiz["source_text_preview"],
+        "source_type": quiz["source_type"],
+        "youtube_video_id": quiz["youtube_video_id"],
+        "questions": public_questions,
+    }
+
+
+def _score_quiz(quiz, answers):
+    answers_map = {a.question_id: a.user_answer for a in answers}
     results, correct_count = [], 0
     for q in quiz["questions"]:
         user_ans = answers_map.get(q["id"], "").strip()
@@ -721,46 +863,54 @@ def submit_quiz(req: SubmitQuizRequest):
             "timestamp_seconds": q.get("timestamp_seconds"),
         })
     total = len(quiz["questions"])
+    pct = round(100 * correct_count / total, 1) if total else 0
+    return correct_count, total, pct, results
+
+
+@app.post("/api/submit-quiz")
+def submit_quiz(req: SubmitQuizRequest):
+    quiz = load_quiz(req.quiz_id)
+    if not quiz:
+        raise HTTPException(status_code=404, detail="Quiz not found.")
+    correct_count, total, pct, results = _score_quiz(quiz, req.answers)
     return {
-        "quiz_id": req.quiz_id, "score": correct_count, "total": total,
-        "percentage": round(100 * correct_count / total, 1) if total else 0,
+        "quiz_id": req.quiz_id,
+        "score": correct_count, "total": total, "percentage": pct,
         "results": results,
         "youtube_video_id": quiz.get("youtube_video_id"),
     }
 
 
-@app.get("/api/quizzes")
-def list_quizzes():
-    return {"quizzes": list_all_quizzes()}
+@app.post("/api/leaderboard/submit")
+def leaderboard_submit(req: LeaderboardSubmitRequest):
+    """Submit a score for a public quiz challenge."""
+    quiz = load_quiz(req.quiz_id)
+    if not quiz:
+        raise HTTPException(status_code=404, detail="Quiz not found.")
+    correct_count, total, pct, results = _score_quiz(quiz, req.answers)
+    display_name = (req.display_name or "").strip() or random_animal_name()
+    save_leaderboard_entry(req.quiz_id, display_name, correct_count, total, pct)
+    return {
+        "quiz_id": req.quiz_id,
+        "display_name": display_name,
+        "score": correct_count, "total": total, "percentage": pct,
+        "results": results,
+        "youtube_video_id": quiz.get("youtube_video_id"),
+    }
 
 
-@app.get("/api/quiz/{quiz_id}/public")
-def get_public_quiz(quiz_id: str):
-    """Get a quiz for someone who has the share link. Hides correct answers."""
+@app.get("/api/leaderboard/{quiz_id}")
+def leaderboard_get(quiz_id: str):
     quiz = load_quiz(quiz_id)
     if not quiz:
         raise HTTPException(status_code=404, detail="Quiz not found.")
-    # Return same shape as get_quiz but strip correct_answer/explanation/source_chunk
-    public_questions = []
-    for q in quiz["questions"]:
-        public_questions.append({
-            "id": q["id"],
-            "type": q["type"],
-            "question": q["question"],
-            "options": q.get("options"),
-            "difficulty": q.get("difficulty", "medium"),
-            "timestamp_seconds": q.get("timestamp_seconds"),
-            # Intentionally omit: correct_answer, explanation, source_chunk
-        })
-    return {
-        "id": quiz["id"],
-        "title": quiz["title"],
-        "created_at": quiz["created_at"],
-        "source_text_preview": quiz["source_text_preview"],
-        "source_type": quiz["source_type"],
-        "youtube_video_id": quiz["youtube_video_id"],
-        "questions": public_questions,
-    }
+    entries = get_leaderboard(quiz_id)
+    return {"quiz_id": quiz_id, "title": quiz["title"], "entries": entries}
+
+
+@app.get("/api/quizzes")
+def list_quizzes():
+    return {"quizzes": list_all_quizzes()}
 
 
 @app.post("/api/chat")
@@ -769,6 +919,16 @@ def chat(req: ChatRequest, request: Request):
     messages = build_chat_messages(req)
     return StreamingResponse(
         stream_chat(messages),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.post("/api/eli5")
+def api_eli5(req: ELI5Request, request: Request):
+    check_chat_rate_limit(request)
+    return StreamingResponse(
+        stream_eli5(req.question, req.answer, req.original_explanation),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
