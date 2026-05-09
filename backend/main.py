@@ -24,17 +24,14 @@ load_dotenv()
 
 app = FastAPI(title="Quiz Generator API", version="1.3.1")
 
-from fastapi.middleware.cors import CORSMiddleware
-
-ALLOWED_ORIGINS = [
-    "http://localhost:5173",
-    "http://localhost:5174",
-    "https://driquiz.vercel.app",
-]
+ALLOWED_ORIGINS = os.getenv(
+    "ALLOWED_ORIGINS",
+    "http://localhost:5173,http://localhost:3000,http://localhost:5174",
+).split(",")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
+    allow_origins=[o.strip() for o in ALLOWED_ORIGINS],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -266,9 +263,27 @@ def get_video_title(video_id: str) -> str:
         return f"YouTube video {video_id}"
 
 
+def _build_ytt_client():
+    """Create a YouTubeTranscriptApi client, with Webshare proxy if configured."""
+    from youtube_transcript_api import YouTubeTranscriptApi
+    proxy_user = os.getenv("WEBSHARE_PROXY_USERNAME")
+    proxy_pass = os.getenv("WEBSHARE_PROXY_PASSWORD")
+    if proxy_user and proxy_pass:
+        try:
+            from youtube_transcript_api.proxies import WebshareProxyConfig
+            return YouTubeTranscriptApi(proxy_config=WebshareProxyConfig(
+                proxy_username=proxy_user,
+                proxy_password=proxy_pass,
+            ))
+        except ImportError:
+            # Older library versions don't support WebshareProxyConfig
+            pass
+    return YouTubeTranscriptApi()
+
+
 def fetch_youtube_transcript(video_id: str) -> tuple[str, list]:
     """
-    Robust transcript fetcher that works with multiple library versions.
+    Transcript fetcher with optional Webshare proxy support.
     Returns:
       - transcript_text: text with [Ns] timestamps inline
       - segments: list of {text, start, duration}
@@ -277,29 +292,26 @@ def fetch_youtube_transcript(video_id: str) -> tuple[str, list]:
     segments = None
     last_err = None
 
-    # Try v1.x API first (newest)
+    # Try v1.x API with optional proxy
     try:
-        from youtube_transcript_api import YouTubeTranscriptApi
-        ytt = YouTubeTranscriptApi()
+        ytt = _build_ytt_client()
         try:
             fetched = ytt.fetch(video_id, languages=languages)
         except Exception:
             fetched = ytt.fetch(video_id)
-        # fetched is a FetchedTranscript with snippets
         try:
             segments = [
                 {"text": s.text, "start": s.start, "duration": s.duration}
                 for s in fetched
             ]
         except Exception:
-            # try .to_raw_data() if available
             segments = fetched.to_raw_data() if hasattr(fetched, "to_raw_data") else None
     except (ImportError, AttributeError, TypeError):
         pass
     except Exception as e:
         last_err = e
 
-    # Fall back to v0.6.x API
+    # Fall back to v0.6.x API (no proxy support there)
     if segments is None:
         try:
             from youtube_transcript_api import YouTubeTranscriptApi
