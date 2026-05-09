@@ -285,7 +285,7 @@ def _build_ytt_client():
 
 def fetch_youtube_transcript(video_id: str) -> tuple[str, list]:
     """
-    Transcript fetcher with optional Webshare proxy support.
+    Transcript fetcher using youtube-transcript-api v1.x with optional Webshare proxy.
     Returns:
       - transcript_text: text with [Ns] timestamps inline
       - segments: list of {text, start, duration}
@@ -294,12 +294,12 @@ def fetch_youtube_transcript(video_id: str) -> tuple[str, list]:
     segments = None
     last_err = None
 
-    # Try v1.x API with optional proxy
     try:
         ytt = _build_ytt_client()
         try:
             fetched = ytt.fetch(video_id, languages=languages)
-        except Exception:
+        except Exception as inner:
+            print(f"[YT] First fetch attempt failed: {inner}", flush=True)
             fetched = ytt.fetch(video_id)
         try:
             segments = [
@@ -308,21 +308,9 @@ def fetch_youtube_transcript(video_id: str) -> tuple[str, list]:
             ]
         except Exception:
             segments = fetched.to_raw_data() if hasattr(fetched, "to_raw_data") else None
-    except (ImportError, AttributeError, TypeError):
-        pass
     except Exception as e:
         last_err = e
-
-    # Fall back to v0.6.x API (no proxy support there)
-    if segments is None:
-        try:
-            from youtube_transcript_api import YouTubeTranscriptApi
-            try:
-                segments = YouTubeTranscriptApi.get_transcript(video_id, languages=languages)
-            except Exception:
-                segments = YouTubeTranscriptApi.get_transcript(video_id)
-        except Exception as e:
-            last_err = e
+        print(f"[YT] Fetch failed entirely: {type(e).__name__}: {e}", flush=True)
 
     if not segments:
         msg = str(last_err) if last_err else "Unknown error"
