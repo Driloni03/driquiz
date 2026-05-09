@@ -6,7 +6,7 @@ export default function Landing() {
     <div className="landing">
       <section className="hero">
         <div className="hero-badge">
-          <Sparkles size={14} /> Powered by Azure OpenAI
+          <Sparkles size={14} /> Powered by Driloni
         </div>
         <h1 className="hero-title">
           Turn anything into a <span className="gradient-text">quiz</span>
