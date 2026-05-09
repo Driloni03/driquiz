@@ -268,16 +268,18 @@ def _build_ytt_client():
     from youtube_transcript_api import YouTubeTranscriptApi
     proxy_user = os.getenv("WEBSHARE_PROXY_USERNAME")
     proxy_pass = os.getenv("WEBSHARE_PROXY_PASSWORD")
+    print(f"[YT] proxy_user set: {bool(proxy_user)}, proxy_pass set: {bool(proxy_pass)}", flush=True)
     if proxy_user and proxy_pass:
         try:
             from youtube_transcript_api.proxies import WebshareProxyConfig
+            print(f"[YT] Using Webshare proxy (user starts with: {proxy_user[:6]}...)", flush=True)
             return YouTubeTranscriptApi(proxy_config=WebshareProxyConfig(
                 proxy_username=proxy_user,
                 proxy_password=proxy_pass,
             ))
-        except ImportError:
-            # Older library versions don't support WebshareProxyConfig
-            pass
+        except ImportError as e:
+            print(f"[YT] WebshareProxyConfig import failed: {e}", flush=True)
+    print("[YT] No proxy - using direct connection", flush=True)
     return YouTubeTranscriptApi()
 
 
