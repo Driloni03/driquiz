@@ -68,7 +68,7 @@ export default function Navbar() {
           <span className="brand-icon">
             <Brain size={18} />
           </span>
-          <span className="brand-text">DriQuiz</span>
+          <span className="brand-text">Drilearn</span>
         </Link>
 
         {/* Desktop nav (hidden on mobile via CSS) */}

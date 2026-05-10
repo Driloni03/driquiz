@@ -1,5 +1,5 @@
 """
-DriQuiz API - FastAPI backend
+Drilearn API - FastAPI backend
 v1.4.0: + concept extraction, ELI5, leaderboard, multi-source quizzes
 """
 import os
@@ -26,7 +26,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-app = FastAPI(title="DriQuiz API", version="1.4.0")
+app = FastAPI(title="Drilearn API", version="1.4.0")
 
 ALLOWED_ORIGINS = os.getenv(
     "ALLOWED_ORIGINS",
@@ -1007,7 +1007,7 @@ Re-explain this in extremely simple terms, like you're talking to a 10-year-old.
 # ---------------------------------------------------------------------------
 @app.get("/")
 def root():
-    return {"status": "ok", "service": "DriQuiz API", "version": "1.4.0"}
+    return {"status": "ok", "service": "Drilearn API", "version": "1.4.0"}
 
 
 @app.get("/health")

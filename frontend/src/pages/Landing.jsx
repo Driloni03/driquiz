@@ -13,7 +13,7 @@ export default function Landing() {
         </h1>
         <p className="hero-subtitle">
           Paste your notes, upload a PDF, or drop a YouTube link.
-          DriQuiz generates a quiz in seconds — with explanations, source citations, and clickable timestamps.
+          Drilearn generates a quiz in seconds — with explanations, source citations, and clickable timestamps.
         </p>
         <div className="hero-cta">
           <Link to="/app" className="btn btn-large">
@@ -80,7 +80,7 @@ export default function Landing() {
       </section>
 
       <footer className="footer">
-        <p>DriQuiz · Built with FastAPI, React, and Azure OpenAI</p>
+        <p>Drilearn · Built with FastAPI, React, and Azure OpenAI</p>
       </footer>
     </div>
   )
