@@ -333,6 +333,18 @@ export const gradeShortAnswer = async (question, correct_answer, student_answer)
   return data
 }
 
+
+// =================== MANUAL QUIZ ===================
+export const createManualQuiz = async (payload) => {
+  const { data } = await api.post('/api/quiz/manual', payload)
+  return data
+}
+
+export const suggestQuestion = async (topic, type, difficulty = 'medium') => {
+  const { data } = await api.post('/api/quiz/suggest-question', { topic, type, difficulty })
+  return data
+}
+
 export const formatTimestamp = (seconds) => {
   if (seconds == null || isNaN(seconds)) return ''
   const m = Math.floor(seconds / 60)

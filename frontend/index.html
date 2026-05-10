@@ -4,7 +4,16 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="description" content="DriQuiz — Turn anything into a quiz. AI-powered quiz generator with tutor chat." />
-    <title>Drilearn — AI Quiz & more Generator</title>
+    <title>DriQuiz — AI Quiz Generator</title>
+    <script>
+      // Apply saved theme before React renders to prevent flash
+      try {
+        var saved = localStorage.getItem('driquiz_theme') || 'dark';
+        document.documentElement.setAttribute('data-theme', saved);
+      } catch (e) {
+        document.documentElement.setAttribute('data-theme', 'dark');
+      }
+    </script>
   </head>
   <body>
     <div id="root"></div>

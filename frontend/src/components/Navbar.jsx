@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { NavLink, Link, useNavigate } from 'react-router-dom'
 import { Brain, GraduationCap, LogOut, User } from 'lucide-react'
 import { getAuthTeacher, apiSignOut } from '../api'
+import ThemeToggle from './ThemeToggle'
 
 export default function Navbar() {
   const navigate = useNavigate()
@@ -50,6 +51,7 @@ export default function Navbar() {
         <NavLink to="/join" className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}>
           Join class
         </NavLink>
+        <ThemeToggle />
         {teacher ? (
           <div className="user-menu">
             <button className="user-button" onClick={() => setMenuOpen(o => !o)}>

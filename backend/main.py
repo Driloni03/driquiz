@@ -2590,3 +2590,135 @@ def api_live_answer(req: SubmitLiveAnswerRequest):
         "points": points,
     }
 
+
+# ===========================================================================
+# v7 — Manual quiz builder + AI question suggestion
+# ===========================================================================
+
+class ManualQuestion(BaseModel):
+    type: Literal["multiple_choice", "true_false", "short_answer"]
+    question: str = Field(..., min_length=1, max_length=2000)
+    options: Optional[List[str]] = None  # for MC
+    correct_answer: str = Field(..., min_length=1, max_length=500)
+    explanation: Optional[str] = ""
+    difficulty: Literal["easy", "medium", "hard"] = "medium"
+
+
+class CreateManualQuizRequest(BaseModel):
+    title: str = Field(..., min_length=1, max_length=200)
+    questions: List[ManualQuestion] = Field(..., min_length=1, max_length=50)
+    time_limit_seconds: Optional[int] = Field(default=None, ge=30, le=7200)
+
+
+class SuggestQuestionRequest(BaseModel):
+    topic: str = Field(..., min_length=2, max_length=500)
+    type: Literal["multiple_choice", "true_false", "short_answer"]
+    difficulty: Literal["easy", "medium", "hard"] = "medium"
+
+
+@app.post("/api/quiz/manual", response_model=Quiz)
+def api_create_manual_quiz(req: CreateManualQuizRequest, request: Request):
+    check_quiz_rate_limit(request)
+    questions_list = []
+    for q in req.questions:
+        # Validate MC has 4 options + correct_answer matches one
+        if q.type == "multiple_choice":
+            if not q.options or len(q.options) < 2:
+                raise HTTPException(status_code=400, detail="Multiple-choice questions need at least 2 options.")
+            if q.correct_answer not in q.options:
+                raise HTTPException(status_code=400, detail=f"Correct answer must be one of the options for: {q.question[:50]}")
+        elif q.type == "true_false":
+            if q.correct_answer not in ("True", "False"):
+                raise HTTPException(status_code=400, detail="True/false answer must be 'True' or 'False'.")
+        questions_list.append({
+            "id": str(uuid.uuid4()),
+            "type": q.type,
+            "question": q.question.strip(),
+            "options": q.options if q.type == "multiple_choice" else None,
+            "correct_answer": q.correct_answer.strip(),
+            "explanation": (q.explanation or "").strip() or "(no explanation provided)",
+            "source_chunk": "",  # manual quizzes have no source
+            "difficulty": q.difficulty,
+            "timestamp_seconds": None,
+        })
+
+    quiz_dict = {
+        "id": str(uuid.uuid4()),
+        "title": req.title.strip(),
+        "created_at": datetime.utcnow().isoformat(),
+        "source_text_preview": "(manually created)",
+        "source_type": "manual",
+        "youtube_video_id": None,
+        "questions": questions_list,
+        "time_limit_seconds": req.time_limit_seconds,
+    }
+    save_quiz(quiz_dict)
+    return Quiz(**quiz_dict)
+
+
+SUGGEST_QUESTION_PROMPT = """Generate ONE quiz question on the topic below.
+
+TOPIC: {topic}
+QUESTION TYPE: {type}
+DIFFICULTY: {difficulty}
+
+Requirements:
+- For multiple_choice: provide exactly 4 options, "correct_answer" is the FULL TEXT of the correct option.
+- For true_false: "correct_answer" is exactly "True" or "False".
+- For short_answer: "correct_answer" is a brief answer (max 10 words).
+- Provide a 1-2 sentence explanation.
+- Match the language of the topic (Albanian, English, etc.).
+
+Respond with ONLY a valid JSON object:
+{{
+  "question": "...",
+  "options": ["..."] or null,
+  "correct_answer": "...",
+  "explanation": "..."
+}}
+
+For true_false and short_answer, set "options": null.
+"""
+
+
+@app.post("/api/quiz/suggest-question")
+def api_suggest_question(req: SuggestQuestionRequest, request: Request):
+    check_chat_rate_limit(request)
+    prompt = SUGGEST_QUESTION_PROMPT.format(
+        topic=req.topic.strip(),
+        type=req.type,
+        difficulty=req.difficulty,
+    )
+    try:
+        response = client.chat.completions.create(
+            model=DEPLOYMENT,
+            messages=[
+                {"role": "system", "content": "You generate single quiz questions as valid JSON only."},
+                {"role": "user", "content": prompt},
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.7,
+            max_tokens=500,
+        )
+        raw = response.choices[0].message.content.strip()
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=500, detail="Could not parse the suggested question.")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Could not suggest a question: {e}")
+
+    # Validate the response matches the type
+    options = data.get("options") if req.type == "multiple_choice" else None
+    if req.type == "multiple_choice" and (not options or len(options) < 2):
+        # Generate fallback if the model didn't provide options
+        raise HTTPException(status_code=500, detail="AI did not return valid multiple-choice options. Try again.")
+
+    return {
+        "type": req.type,
+        "question": data.get("question", "").strip(),
+        "options": options,
+        "correct_answer": str(data.get("correct_answer", "")).strip(),
+        "explanation": data.get("explanation", "").strip(),
+        "difficulty": req.difficulty,
+    }
+

@@ -3354,3 +3354,345 @@ details summary:hover { color: var(--text); }
   }
   .podium-1, .podium-2, .podium-3 { order: unset; transform: none; padding: 0.85rem; }
 }
+/* ============================================================
+   v7 styles — Manual quiz builder
+   Append to existing styles.css
+   ============================================================ */
+
+/* AI vs Manual sub-mode picker */
+.submode-row {
+  display: flex;
+  gap: 0.4rem;
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 4px;
+  margin-bottom: 1.25rem;
+}
+.submode-btn {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  padding: 0.55rem 0.9rem;
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  font-size: 0.88rem;
+  font-weight: 500;
+  font-family: inherit;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all var(--t-mid);
+}
+.submode-btn:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--surface-2);
+}
+.submode-btn.active {
+  background: linear-gradient(135deg, var(--accent), var(--accent-deep));
+  color: white;
+  box-shadow: 0 4px 12px var(--accent-glow);
+}
+.submode-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Manual question list */
+.manual-questions-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  margin-bottom: 1rem;
+}
+
+.manual-question-card {
+  padding: 0;
+  overflow: hidden;
+}
+
+.manual-question-header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.85rem 1rem;
+  cursor: pointer;
+  user-select: none;
+  background: var(--surface);
+  transition: background var(--t-fast);
+}
+.manual-question-header:hover { background: var(--surface-2); }
+
+.manual-question-num {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.25rem 0.6rem;
+  background: var(--accent-bg);
+  color: var(--accent-light);
+  border-radius: 999px;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.manual-question-preview {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-size: 0.95rem;
+}
+
+.manual-question-controls {
+  display: flex;
+  gap: 0.25rem;
+  flex-shrink: 0;
+}
+
+.icon-btn-small {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: all var(--t-fast);
+}
+.icon-btn-small:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent-light);
+  background: var(--accent-bg);
+}
+.icon-btn-small:disabled { opacity: 0.3; cursor: not-allowed; }
+
+.manual-question-body {
+  padding: 1rem;
+  border-top: 1px solid var(--border);
+  background: var(--bg-soft);
+  animation: fadeUp 0.2s ease-out;
+}
+
+/* Option row inside MC editor */
+.manual-option-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.4rem;
+}
+
+.manual-option-radio {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: var(--surface-2);
+  border: 2px solid var(--border);
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-weight: 700;
+  font-size: 0.85rem;
+  cursor: pointer;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all var(--t-mid);
+}
+.manual-option-radio:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent-light);
+}
+.manual-option-radio:disabled { opacity: 0.4; cursor: not-allowed; }
+.manual-option-radio.selected {
+  background: linear-gradient(135deg, var(--accent), var(--accent-deep));
+  border-color: var(--accent);
+  color: white;
+  box-shadow: 0 0 0 3px var(--accent-bg);
+}
+
+/* Add buttons row */
+.manual-add-row {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
+}
+
+/* AI suggest card highlight */
+.suggest-card {
+  border-color: var(--accent-border) !important;
+  background: linear-gradient(135deg, var(--accent-bg) 0%, var(--surface) 50%) !important;
+}
+/* ============================================================
+   v8 — Light theme
+   Activated by html[data-theme="light"]
+   ============================================================ */
+
+html[data-theme="light"] {
+  /* Surfaces — warm light */
+  --bg: #faf9fc;
+  --bg-soft: #f4f1f9;
+  --surface: #ffffff;
+  --surface-2: #f4f1f9;
+  --surface-3: #ebe6f5;
+  --border: #e2dcef;
+  --border-strong: #cdc4e0;
+
+  /* Text — dark on light */
+  --text: #1a1430;
+  --text-secondary: #3d3457;
+  --text-dim: #6b6184;
+  --text-fade: #9b93b3;
+
+  /* Accent — same purple, slightly darker for contrast */
+  --accent: #6d28d9;
+  --accent-light: #7c3aed;
+  --accent-deep: #4c1d95;
+  --accent-glow: rgba(109, 40, 217, 0.25);
+  --accent-bg: rgba(124, 58, 237, 0.08);
+  --accent-bg-strong: rgba(124, 58, 237, 0.16);
+  --accent-border: rgba(124, 58, 237, 0.3);
+
+  /* Semantic — slightly darker for AA contrast on white */
+  --success: #16a34a;
+  --success-bg: rgba(22, 163, 74, 0.1);
+  --error: #dc2626;
+  --error-bg: rgba(220, 38, 38, 0.08);
+  --warn: #d97706;
+
+  /* Effects */
+  --shadow-sm: 0 1px 2px rgba(36, 24, 73, 0.08);
+  --shadow-md: 0 4px 16px rgba(36, 24, 73, 0.08);
+  --shadow-lg: 0 16px 48px rgba(36, 24, 73, 0.12);
+}
+
+/* Light-mode background tweaks */
+html[data-theme="light"] body::before {
+  background:
+    radial-gradient(ellipse 900px 700px at 80% -10%, rgba(124, 58, 237, 0.08), transparent 60%),
+    radial-gradient(ellipse 700px 500px at -10% 100%, rgba(167, 139, 250, 0.05), transparent 60%),
+    radial-gradient(ellipse 500px 400px at 50% 50%, rgba(91, 33, 182, 0.03), transparent 60%);
+}
+html[data-theme="light"] body::after {
+  background-image:
+    radial-gradient(circle at 25% 15%, rgba(36, 24, 73, 0.04) 1px, transparent 1.5px),
+    radial-gradient(circle at 75% 85%, rgba(36, 24, 73, 0.04) 1px, transparent 1.5px);
+}
+
+/* Buttons in light mode keep gradient but ensure text stays white */
+html[data-theme="light"] .btn { color: white; }
+html[data-theme="light"] .btn-secondary { color: var(--text); }
+
+/* Header heading uses gradient text - tweak for light */
+html[data-theme="light"] .header h1 {
+  background: linear-gradient(135deg, #1a1430 0%, #4c1d95 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Hero gradient text - keep but darker */
+html[data-theme="light"] .gradient-text {
+  background: linear-gradient(135deg, #6d28d9 0%, #a855f7 50%, #4c1d95 100%);
+  background-size: 200% 200%;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Score number - in light mode use a darker gradient */
+html[data-theme="light"] .score-number {
+  background: linear-gradient(135deg, var(--accent), var(--accent-deep));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Navbar brand text gradient */
+html[data-theme="light"] .navbar-brand .brand-text {
+  background: linear-gradient(135deg, #1a1430, var(--accent));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Navbar background — slightly translucent white */
+html[data-theme="light"] .navbar {
+  background: rgba(255, 255, 255, 0.85);
+}
+
+/* Quiz row title - flashcard back text - keep readable */
+html[data-theme="light"] .flashcard-back {
+  background: linear-gradient(135deg, var(--accent), var(--accent-deep));
+  color: white;
+}
+html[data-theme="light"] .flashcard-back .flashcard-label,
+html[data-theme="light"] .flashcard-back .flashcard-hint {
+  color: rgba(255, 255, 255, 0.85);
+}
+html[data-theme="light"] .flashcard-back .flashcard-text { color: white; }
+
+/* Live code pulse — make it more visible on light */
+html[data-theme="light"] .live-code-text {
+  text-shadow: 0 0 16px rgba(124, 58, 237, 0.4);
+}
+
+/* Result correct/wrong cards - tighten contrast on light */
+html[data-theme="light"] .option.correct {
+  background: rgba(22, 163, 74, 0.1);
+}
+html[data-theme="light"] .option.incorrect {
+  background: rgba(220, 38, 38, 0.08);
+}
+
+/* Class header overlay - light tweak */
+html[data-theme="light"] .class-header {
+  background: white;
+}
+
+/* Print styles already exist, no change needed for light */
+
+/* Smooth theme transition */
+html { transition: background 0.2s ease; }
+body { transition: background 0.2s ease, color 0.2s ease; }
+.card, .navbar, .input, .textarea, .select, .btn-secondary,
+.option, .quiz-row, .feature-card {
+  transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease;
+}
+
+
+/* Theme toggle button */
+.theme-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all var(--t-mid);
+  margin-right: 0.25rem;
+}
+.theme-toggle:hover {
+  background: var(--accent-bg);
+  color: var(--accent-light);
+  border-color: var(--accent-border);
+  transform: rotate(15deg);
+}
+
+/* Mobile: keep toggle but slightly smaller */
+@media (max-width: 600px) {
+  .theme-toggle {
+    width: 32px;
+    height: 32px;
+  }
+}

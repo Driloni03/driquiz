@@ -2,8 +2,9 @@ import { useState, useEffect } from 'react'
 import {
   Upload, FileText, Sparkles, CheckCircle2, XCircle, RotateCcw, BookOpen,
   Loader2, Video as Youtube, Clock, Plus, X, Lightbulb, ArrowRight, ArrowLeft,
-  Layers, ScrollText, Brain,
+  Layers, ScrollText, Brain, Edit3, Wand2,
 } from 'lucide-react'
+import ManualQuizBuilder from '../components/ManualQuizBuilder'
 import {
   uploadPdf, generateQuiz, fetchYoutubeTranscript, pasteYoutubeTranscript,
   extractConcepts, generateFlashcardsFromText, generateNotes, listQuizzes,
@@ -42,6 +43,7 @@ const persistSavedSources = (arr) => {
 
 export default function CreateQuiz() {
   const [mode, setMode] = useState('quiz') // 'quiz' | 'flashcards' | 'notes'
+  const [quizSubMode, setQuizSubMode] = useState('ai') // 'ai' | 'manual' (only when mode==='quiz')
   const [step, setStep] = useState('input') // 'input' | 'concepts' | 'settings'
   const [sources, setSources] = useState([])  // current quiz's sources only
   const [savedSources, setSavedSources] = useState([])  // previously added in this session
@@ -230,6 +232,15 @@ export default function CreateQuiz() {
 
         <ModePicker mode={mode} setMode={setMode} disabled={step !== 'input'} />
 
+        {mode === 'quiz' && (
+          <QuizSubModePicker subMode={quizSubMode} setSubMode={setQuizSubMode} disabled={step !== 'input'} />
+        )}
+
+        {mode === 'quiz' && quizSubMode === 'manual' ? (
+          <ManualQuizBuilder onCancel={() => setQuizSubMode('ai')} />
+        ) : (
+          <>
+
         {/* STEP INDICATOR */}
         <div className="step-indicator">
           <div className={`step-dot ${step === 'input' ? 'active' : 'done'}`}>1</div>
@@ -303,6 +314,8 @@ export default function CreateQuiz() {
             loading={loading}
             loadingMsg={loadingMsg}
           />
+        )}
+          </>
         )}
       </div>
 
@@ -935,6 +948,30 @@ function NotesSettingsStep({ handleGenerate, back, loading, loadingMsg }) {
         </button>
         <button className="btn btn-secondary" onClick={back} disabled={loading}><ArrowLeft size={16} /> Back</button>
       </div>
+    </div>
+  )
+}
+
+/* ============================================================
+   AI vs Manual sub-mode picker (only shown for Quiz mode)
+   ============================================================ */
+function QuizSubModePicker({ subMode, setSubMode, disabled }) {
+  return (
+    <div className="submode-row">
+      <button
+        className={`submode-btn ${subMode === 'ai' ? 'active' : ''}`}
+        onClick={() => !disabled && setSubMode('ai')}
+        disabled={disabled && subMode !== 'ai'}
+      >
+        <Wand2 size={14} /> Generate with AI
+      </button>
+      <button
+        className={`submode-btn ${subMode === 'manual' ? 'active' : ''}`}
+        onClick={() => !disabled && setSubMode('manual')}
+        disabled={disabled && subMode !== 'manual'}
+      >
+        <Edit3 size={14} /> Build manually
+      </button>
     </div>
   )
 }
