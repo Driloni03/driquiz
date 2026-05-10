@@ -3696,3 +3696,674 @@ body { transition: background 0.2s ease, color 0.2s ease; }
     height: 32px;
   }
 }
+/* ============================================================
+   v9 — Comprehensive mobile pass
+   Append to existing styles.css
+   ============================================================ */
+
+/* ----------------------------------------------------------
+   Mobile nav: hamburger + drawer
+   ---------------------------------------------------------- */
+.navbar-mobile-controls {
+  display: none;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.hamburger-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all var(--t-fast);
+}
+.hamburger-btn:hover { background: var(--surface-2); }
+
+.mobile-nav-drawer {
+  display: none;
+  position: fixed;
+  top: 64px;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(8, 6, 15, 0.96);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  z-index: 99;
+  animation: fadeIn 0.2s ease-out;
+  overflow-y: auto;
+}
+html[data-theme="light"] .mobile-nav-drawer {
+  background: rgba(250, 249, 252, 0.96);
+}
+
+.mobile-nav-content {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding: 1.25rem 1rem 2rem;
+  max-width: 480px;
+  margin: 0 auto;
+}
+
+.mobile-nav-content .nav-link {
+  padding: 1rem 1.1rem;
+  font-size: 1rem;
+  border-radius: var(--radius);
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+
+.mobile-nav-content .nav-link.active {
+  background: var(--accent-bg);
+  border-color: var(--accent);
+  color: var(--accent-light);
+}
+
+.mobile-nav-content .nav-link::after { display: none; }
+
+.mobile-nav-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 0.5rem 0;
+}
+
+.mobile-nav-user {
+  padding: 0.85rem 1.1rem;
+  background: var(--accent-bg);
+  border: 1px solid var(--accent-border);
+  border-radius: var(--radius);
+}
+
+.mobile-nav-signout {
+  text-align: left;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 1rem;
+}
+
+@media (max-width: 768px) {
+  .navbar-links-desktop { display: none; }
+  .navbar-mobile-controls { display: flex; }
+  .mobile-nav-drawer { display: block; }
+}
+
+/* ----------------------------------------------------------
+   General responsive sizing improvements
+   ---------------------------------------------------------- */
+@media (max-width: 600px) {
+  /* Tighter container padding on small screens */
+  .container {
+    padding: 1.25rem 0.85rem 4rem;
+  }
+
+  /* Reduce header sizes */
+  .header { margin-bottom: 1.5rem; padding-bottom: 1rem; }
+  .header h1 {
+    font-size: 1.6rem !important;
+    line-height: 1.2;
+  }
+  .header p { font-size: 0.88rem; }
+
+  /* Card padding on small screens */
+  .card { padding: 1.1rem; margin-bottom: 0.85rem; }
+  .card h2 { font-size: 1.2rem; margin-bottom: 0.85rem; }
+
+  /* Tabs - stop them wrapping awkwardly */
+  .tabs {
+    overflow-x: auto;
+    flex-wrap: nowrap;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .tabs::-webkit-scrollbar { display: none; }
+  .tab {
+    flex: 0 0 auto;
+    white-space: nowrap;
+    font-size: 0.82rem;
+    padding: 0.5rem 0.75rem;
+  }
+
+  /* Score banner - smaller on mobile */
+  .score-banner { padding: 2rem 1rem; }
+  .score-number { font-size: 3.5rem !important; }
+  .score-label { font-size: 0.85rem; }
+
+  /* Buttons in a row should wrap nicely */
+  .button-row { gap: 0.5rem; }
+  .btn-large { padding: 0.85rem 1.25rem; font-size: 0.95rem; }
+  .btn { font-size: 0.88rem; padding: 0.75rem 1.1rem; }
+  .btn-small { font-size: 0.78rem; padding: 0.5rem 0.75rem; }
+}
+
+/* ----------------------------------------------------------
+   Class header (squish on mobile)
+   ---------------------------------------------------------- */
+@media (max-width: 600px) {
+  .class-header {
+    padding: 1rem;
+    gap: 0.75rem;
+  }
+  .class-header-icon {
+    width: 44px;
+    height: 44px;
+    border-radius: 11px;
+  }
+  .class-header-icon svg { width: 22px; height: 22px; }
+  .class-header-info h1 {
+    font-size: 1.3rem !important;
+  }
+  .class-header-info p {
+    font-size: 0.82rem;
+  }
+}
+
+/* ----------------------------------------------------------
+   Stats grid - stack on small screens
+   ---------------------------------------------------------- */
+@media (max-width: 600px) {
+  .stats-grid {
+    grid-template-columns: repeat(3, 1fr);
+    gap: 0.5rem;
+  }
+  .stat-card { padding: 0.85rem 0.5rem; }
+  .stat-value { font-size: 1.4rem; }
+  .stat-icon { width: 28px; height: 28px; margin-bottom: 0.35rem; }
+  .stat-label { font-size: 0.7rem; }
+}
+
+@media (max-width: 380px) {
+  .stats-grid { grid-template-columns: 1fr; }
+}
+
+/* ----------------------------------------------------------
+   Question cards - tighter on mobile
+   ---------------------------------------------------------- */
+@media (max-width: 600px) {
+  .question-card { padding: 1.1rem 1rem; }
+  .question-text {
+    font-size: 0.98rem;
+    line-height: 1.45;
+    margin-bottom: 0.85rem;
+  }
+  .question-header {
+    margin-bottom: 0.75rem;
+    gap: 0.4rem;
+  }
+  .option {
+    padding: 0.75rem 0.85rem;
+    font-size: 0.9rem;
+  }
+  .badge {
+    font-size: 0.65rem;
+    padding: 0.18rem 0.5rem;
+  }
+  .timestamp-link {
+    font-size: 0.7rem;
+    padding: 0.2rem 0.5rem;
+  }
+}
+
+/* ----------------------------------------------------------
+   LIVE MODE — biggest mobile fixes
+   ---------------------------------------------------------- */
+@media (max-width: 600px) {
+  /* Live code — keep big and readable but fit screen */
+  .live-code-text {
+    font-size: 1.85rem;
+    letter-spacing: 0.15em;
+  }
+  .live-code-box {
+    padding: 1rem;
+    flex-direction: column;
+    gap: 0.6rem;
+  }
+  .live-code-box .btn-small {
+    align-self: stretch;
+    justify-content: center;
+  }
+
+  /* Question text smaller on mobile */
+  .live-question-text {
+    font-size: 1.2rem !important;
+    line-height: 1.3;
+    margin: 0.5rem 0 1rem;
+  }
+
+  /* Answer buttons - taller, easier to tap */
+  .live-options-grid {
+    grid-template-columns: 1fr 1fr;
+    gap: 0.5rem;
+  }
+  .live-option-btn {
+    min-height: 70px;
+    font-size: 0.95rem;
+    padding: 1rem 0.75rem;
+    word-break: break-word;
+  }
+  .live-option {
+    padding: 0.75rem 0.85rem;
+  }
+  .live-option-text {
+    font-size: 0.9rem;
+    word-break: break-word;
+  }
+
+  /* Score bar - tighter */
+  .live-score-bar {
+    padding: 0.6rem 0.85rem;
+    font-size: 0.85rem;
+  }
+  .live-score-points { font-size: 1.15rem; }
+
+  /* Player chips - smaller */
+  .live-players-grid {
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  }
+  .live-player-chip {
+    padding: 0.45rem 0.65rem;
+    font-size: 0.85rem;
+  }
+
+  /* Podium - already stacks via existing media query, but tighten */
+  .podium-spot { padding: 0.85rem; }
+  .podium-medal { font-size: 1.6rem; }
+  .podium-name { font-size: 0.85rem; }
+
+  /* Sticky action button at bottom on host view */
+  .live-host-meta { font-size: 0.78rem; }
+}
+
+/* T/F - keep as 2 columns even on small screens (looks better than stacked) */
+@media (max-width: 380px) {
+  .live-options-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ----------------------------------------------------------
+   Manual quiz builder — fix header overflow on mobile
+   ---------------------------------------------------------- */
+@media (max-width: 600px) {
+  .manual-question-header {
+    flex-wrap: wrap;
+    padding: 0.7rem 0.85rem;
+    gap: 0.5rem;
+  }
+  .manual-question-num {
+    font-size: 0.7rem;
+    padding: 0.2rem 0.5rem;
+  }
+  .manual-question-preview {
+    flex: 1 1 100%;
+    order: 3;
+    font-size: 0.88rem;
+  }
+  .manual-question-controls {
+    margin-left: auto;
+  }
+  .manual-question-body { padding: 0.85rem; }
+
+  .manual-option-row { gap: 0.4rem; }
+  .manual-option-radio {
+    width: 28px;
+    height: 28px;
+    font-size: 0.78rem;
+  }
+
+  .manual-add-row {
+    flex-direction: column;
+  }
+  .manual-add-row .btn { width: 100%; justify-content: center; }
+}
+
+/* ----------------------------------------------------------
+   Submode picker (AI vs Manual) - stack on small screens
+   ---------------------------------------------------------- */
+@media (max-width: 480px) {
+  .submode-row {
+    flex-direction: column;
+    gap: 0.3rem;
+  }
+  .submode-btn {
+    padding: 0.7rem 0.9rem;
+    font-size: 0.9rem;
+  }
+}
+
+/* ----------------------------------------------------------
+   Mode picker - single column on tiny screens (already done)
+   Time limit chips - wrap nicer
+   ---------------------------------------------------------- */
+@media (max-width: 600px) {
+  .time-limit-row {
+    gap: 0.3rem;
+  }
+  .time-chip {
+    padding: 0.45rem 0.7rem;
+    font-size: 0.78rem;
+  }
+}
+
+/* ----------------------------------------------------------
+   Modals - more breathing room on mobile
+   ---------------------------------------------------------- */
+@media (max-width: 600px) {
+  .modal-backdrop { padding: 0.5rem; }
+  .modal {
+    max-height: 85vh;
+    border-radius: var(--radius);
+  }
+  .modal-header { padding: 0.85rem 1rem; }
+  .modal-header h3 { font-size: 1rem; }
+  .modal-subtitle { padding: 0 1rem; font-size: 0.8rem; }
+  .modal-body { padding: 0.85rem 1rem 1rem; }
+}
+
+/* ----------------------------------------------------------
+   User menu popup - prevent off-screen on mobile
+   ---------------------------------------------------------- */
+@media (max-width: 600px) {
+  .user-menu-popup {
+    right: 0;
+    left: auto;
+    min-width: 200px;
+    max-width: calc(100vw - 2rem);
+  }
+}
+
+/* ----------------------------------------------------------
+   Forms / inputs on mobile
+   ---------------------------------------------------------- */
+@media (max-width: 600px) {
+  /* Prevent iOS auto-zoom by ensuring input font is at least 16px */
+  .input, .textarea, .select {
+    font-size: 16px;
+    padding: 0.7rem 0.85rem;
+  }
+  .label {
+    font-size: 0.72rem;
+  }
+  .row {
+    grid-template-columns: 1fr;
+    gap: 0.85rem;
+    margin-bottom: 0.85rem;
+  }
+}
+
+/* ----------------------------------------------------------
+   Hero section on mobile
+   ---------------------------------------------------------- */
+@media (max-width: 600px) {
+  .hero {
+    padding: 3rem 1rem 2rem;
+  }
+  .hero-title {
+    font-size: clamp(2.2rem, 9vw, 3.2rem) !important;
+    line-height: 1.05;
+  }
+  .hero-subtitle {
+    font-size: 1rem;
+    margin-bottom: 1.5rem;
+  }
+  .hero-cta {
+    flex-direction: column;
+    gap: 0.6rem;
+  }
+  .hero-cta .btn { width: 100%; justify-content: center; }
+  .hero-meta { font-size: 0.78rem; }
+  .hero-badge { font-size: 0.7rem; padding: 0.3rem 0.7rem; }
+}
+
+@media (max-width: 600px) {
+  .features { padding: 3rem 1rem; }
+  .section-title { font-size: 1.85rem !important; margin-bottom: 2rem; }
+  .feature-card { padding: 1.25rem; }
+  .feature-card h3 { font-size: 1.15rem; }
+  .feature-card p { font-size: 0.88rem; }
+  .how-it-works { padding: 3rem 1rem; }
+  .step h3 { font-size: 1.1rem; }
+  .step-number { width: 50px; height: 50px; font-size: 1.3rem; }
+  .cta-bottom { padding: 3rem 1rem; }
+  .cta-bottom h2 { font-size: 1.85rem !important; }
+}
+
+/* ----------------------------------------------------------
+   Quiz row (history list) - tighter on mobile
+   ---------------------------------------------------------- */
+@media (max-width: 600px) {
+  .quiz-row {
+    padding: 0.85rem 1rem;
+    gap: 0.6rem;
+  }
+  .quiz-row-icon {
+    width: 36px;
+    height: 36px;
+  }
+  .quiz-row-title { font-size: 0.95rem; }
+  .quiz-row-meta { font-size: 0.7rem; flex-wrap: wrap; }
+  .quiz-row-actions {
+    flex-wrap: wrap;
+    width: 100%;
+    justify-content: flex-end;
+  }
+  .quiz-row-actions .btn-small {
+    flex: 0 0 auto;
+  }
+}
+
+/* ----------------------------------------------------------
+   Assignment list on mobile
+   ---------------------------------------------------------- */
+@media (max-width: 600px) {
+  .assignment-row { padding: 0.75rem 0.85rem; gap: 0.6rem; }
+  .assignment-title { font-size: 0.95rem; }
+  .assignment-meta { font-size: 0.72rem; flex-wrap: wrap; }
+  .assignment-actions { flex-wrap: wrap; gap: 0.3rem; }
+}
+
+/* ----------------------------------------------------------
+   Submission/leaderboard rows
+   ---------------------------------------------------------- */
+@media (max-width: 600px) {
+  .submission-row { padding: 0.6rem 0.75rem; gap: 0.6rem; }
+  .submission-name { font-size: 0.85rem; }
+  .submission-time { font-size: 0.7rem; }
+  .submission-score strong { font-size: 1.05rem; }
+
+  .leaderboard-row { padding: 0.55rem 0.75rem; gap: 0.6rem; }
+  .leaderboard-name { font-size: 0.88rem; }
+}
+
+/* ----------------------------------------------------------
+   Member roster
+   ---------------------------------------------------------- */
+@media (max-width: 600px) {
+  .member-list {
+    grid-template-columns: 1fr;
+    gap: 0.4rem;
+  }
+}
+
+/* ----------------------------------------------------------
+   Class code box - already stacks (good), tighten font
+   ---------------------------------------------------------- */
+@media (max-width: 600px) {
+  .class-code-text {
+    font-size: 1.4rem;
+    letter-spacing: 0.12em;
+  }
+}
+
+/* ----------------------------------------------------------
+   Chat widget - bigger on mobile (full screen)
+   Already exists but enforce above bottom safe area on iOS
+   ---------------------------------------------------------- */
+@media (max-width: 480px) {
+  .chat-bubble {
+    bottom: max(1rem, env(safe-area-inset-bottom, 1rem));
+    right: max(1rem, env(safe-area-inset-right, 1rem));
+  }
+  .chat-panel {
+    height: 100dvh;
+    max-height: 100dvh;
+    width: 100vw;
+    right: 0;
+    bottom: 0;
+    border-radius: 0;
+    border-left: none;
+    border-right: none;
+    border-bottom: none;
+  }
+  .chat-input {
+    font-size: 16px;
+  }
+}
+
+/* ----------------------------------------------------------
+   Flashcards on mobile - bigger touch target, smaller text
+   ---------------------------------------------------------- */
+@media (max-width: 600px) {
+  .flashcard { height: 260px; }
+  .flashcard-text { font-size: 1.1rem; }
+  .flashcard-back .flashcard-text { font-size: 1rem; }
+  .flashcard-face { padding: 1.5rem 1.25rem; }
+  .grade-row {
+    grid-template-columns: 1fr 1fr;
+    gap: 0.4rem;
+  }
+  .grade-btn {
+    padding: 0.85rem 0.5rem;
+    min-height: 70px;
+  }
+  .grade-btn .grade-label { font-size: 0.85rem; }
+}
+
+/* ----------------------------------------------------------
+   Notes article - smaller padding on mobile (already exists)
+   Headings smaller too
+   ---------------------------------------------------------- */
+@media (max-width: 600px) {
+  .notes-article { padding: 1.25rem 1rem; }
+  .notes-article h1 { font-size: 1.4rem; }
+  .notes-article h2 { font-size: 1.15rem; }
+  .notes-article h3 { font-size: 1.02rem; }
+  .notes-article p, .notes-article li { font-size: 0.92rem; }
+}
+
+/* ----------------------------------------------------------
+   Step indicator (dots between create steps)
+   ---------------------------------------------------------- */
+@media (max-width: 600px) {
+  .step-line { width: 30px; }
+  .step-dot { width: 28px; height: 28px; font-size: 0.78rem; }
+}
+
+/* ----------------------------------------------------------
+   Sources list (concept items, source chips)
+   ---------------------------------------------------------- */
+@media (max-width: 600px) {
+  .source-chip { padding: 0.55rem 0.75rem; }
+  .source-chip-label { font-size: 0.85rem; }
+  .source-chip-meta { font-size: 0.68rem; }
+  .concept-item { padding: 0.7rem 0.85rem; }
+  .concept-name { font-size: 0.9rem; }
+  .concept-desc { font-size: 0.82rem; }
+}
+
+/* ----------------------------------------------------------
+   Format cards (notes summary vs guide)
+   ---------------------------------------------------------- */
+@media (max-width: 600px) {
+  .format-cards { gap: 0.5rem; }
+  .format-card { padding: 0.85rem 0.95rem; }
+  .format-card-title { font-size: 0.95rem; }
+  .format-card-desc { font-size: 0.78rem; }
+}
+
+/* ----------------------------------------------------------
+   Mode picker cards
+   ---------------------------------------------------------- */
+@media (max-width: 600px) {
+  .mode-picker { gap: 0.4rem; }
+  .mode-card { padding: 0.7rem 0.85rem; gap: 0.55rem; }
+  .mode-card-icon { width: 32px; height: 32px; }
+  .mode-card-label { font-size: 0.9rem; }
+  .mode-card-desc { font-size: 0.72rem; }
+}
+
+/* ----------------------------------------------------------
+   Timer banner sticky-top on mobile too
+   ---------------------------------------------------------- */
+@media (max-width: 600px) {
+  .timer-banner {
+    top: 56px;  /* below mobile navbar */
+    padding: 0.6rem 0.85rem;
+  }
+  .timer-time { font-size: 1rem; }
+  .timer-label { font-size: 0.78rem; }
+}
+
+/* ----------------------------------------------------------
+   Dashboard actions (Create class / Live quiz)
+   ---------------------------------------------------------- */
+@media (max-width: 480px) {
+  .dashboard-actions {
+    grid-template-columns: 1fr;
+    gap: 0.5rem;
+  }
+}
+
+/* ----------------------------------------------------------
+   Sticky action bar for live host (so Reveal/Next is reachable)
+   ---------------------------------------------------------- */
+@media (max-width: 600px) {
+  .live-host-actions-sticky {
+    position: sticky;
+    bottom: 0;
+    background: linear-gradient(180deg, transparent, var(--bg) 30%);
+    padding-top: 1rem;
+    margin: 0 -0.5rem;
+    z-index: 10;
+  }
+}
+
+/* ----------------------------------------------------------
+   Source quote / explanation - prevent overflow
+   ---------------------------------------------------------- */
+.source-quote, .explanation, .question-text, .question-summary-text {
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+}
+
+/* ----------------------------------------------------------
+   Prevent horizontal scroll anywhere
+   ---------------------------------------------------------- */
+html, body {
+  overflow-x: hidden;
+  max-width: 100vw;
+}
+
+/* Ensure long URLs in chat / notes don't push layout */
+.chat-msg-bubble, .notes-article a {
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+/* ----------------------------------------------------------
+   Touch targets: ensure all interactive elements are ≥40px
+   on mobile (Apple/Google guideline)
+   ---------------------------------------------------------- */
+@media (max-width: 600px) {
+  .icon-btn-small { width: 36px; height: 36px; }
+  .source-chip-remove { padding: 0.45rem; }
+  .chat-close { padding: 0.55rem; }
+}
