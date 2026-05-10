@@ -109,6 +109,107 @@ export const streamChat = async ({ messages, mode, context, onDelta, signal }) =
 export const streamEli5 = async ({ question, answer, original_explanation, onDelta, signal }) =>
   streamEndpoint('/api/eli5', { question, answer, original_explanation }, onDelta, signal)
 
+
+// Flashcards
+export const generateFlashcardsFromText = async (payload) => {
+  const { data } = await api.post('/api/flashcards/generate-from-text', payload)
+  return data
+}
+
+export const generateFlashcardsFromQuiz = async (quiz_id, title) => {
+  const { data } = await api.post('/api/flashcards/generate-from-quiz', { quiz_id, title })
+  return data
+}
+
+export const getFlashcardSet = async (setId) => {
+  const { data } = await api.get(`/api/flashcards/${setId}`)
+  return data
+}
+
+export const listFlashcardSets = async () => {
+  const { data } = await api.get('/api/flashcards')
+  return data.sets
+}
+
+// Study notes
+export const generateNotes = async (payload) => {
+  const { data } = await api.post('/api/notes/generate', payload)
+  return data
+}
+
+export const getNote = async (noteId) => {
+  const { data } = await api.get(`/api/notes/${noteId}`)
+  return data
+}
+
+export const listNotes = async () => {
+  const { data } = await api.get('/api/notes')
+  return data.notes
+}
+
+
+// =================== CLASSROOM ===================
+export const createClass = async (name, teacher_name) => {
+  const { data } = await api.post('/api/classes', { name, teacher_name })
+  return data
+}
+
+export const listClasses = async () => {
+  const { data } = await api.get('/api/classes')
+  return data.classes
+}
+
+export const getClass = async (classId) => {
+  const { data } = await api.get(`/api/classes/${classId}`)
+  return data
+}
+
+export const deleteClass = async (classId) => {
+  const { data } = await api.delete(`/api/classes/${classId}`)
+  return data
+}
+
+export const getClassByCode = async (code) => {
+  const { data } = await api.get(`/api/classes/by-code/${code}`)
+  return data
+}
+
+export const joinClass = async (code, student_name) => {
+  const { data } = await api.post('/api/classes/join', { code, student_name })
+  return data
+}
+
+export const createAssignment = async (class_id, quiz_id, due_at = null) => {
+  const { data } = await api.post('/api/assignments', { class_id, quiz_id, due_at })
+  return data
+}
+
+export const deleteAssignment = async (assignmentId) => {
+  const { data } = await api.delete(`/api/assignments/${assignmentId}`)
+  return data
+}
+
+export const getAssignment = async (assignmentId) => {
+  const { data } = await api.get(`/api/assignments/${assignmentId}`)
+  return data
+}
+
+export const submitAssignment = async (assignment_id, student_name, answers) => {
+  const { data } = await api.post('/api/assignments/submit', { assignment_id, student_name, answers })
+  return data
+}
+
+export const getAssignmentAnalytics = async (assignmentId) => {
+  const { data } = await api.get(`/api/assignments/${assignmentId}/analytics`)
+  return data
+}
+
+export const exportAssignmentCsvUrl = (assignmentId) =>
+  `${API_BASE}/api/assignments/${assignmentId}/export.csv`
+
+export const exportClassCsvUrl = (classId) =>
+  `${API_BASE}/api/classes/${classId}/export.csv`
+
 export const formatTimestamp = (seconds) => {
   if (seconds == null || isNaN(seconds)) return ''
   const m = Math.floor(seconds / 60)

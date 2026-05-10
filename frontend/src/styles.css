@@ -1973,3 +1973,730 @@ details summary:hover { color: var(--text); }
   color: var(--accent-light);
   font-weight: 700;
 }
+/* ============================================================
+   v4 STYLES — Mode picker, flashcards, study notes
+   Append to existing styles.css
+   ============================================================ */
+
+/* Mode picker */
+.mode-picker {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.6rem;
+  margin-bottom: 1.5rem;
+}
+
+@media (max-width: 600px) {
+  .mode-picker { grid-template-columns: 1fr; }
+}
+
+.mode-card {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  padding: 0.85rem 1rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: all var(--t-mid);
+  text-align: left;
+  font-family: inherit;
+  color: var(--text-dim);
+}
+
+.mode-card:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  color: var(--text);
+  transform: translateY(-2px);
+}
+
+.mode-card.active {
+  border-color: var(--accent);
+  background: linear-gradient(135deg, var(--accent-bg-strong), var(--accent-bg));
+  color: var(--text);
+  box-shadow: 0 0 0 3px var(--accent-bg), 0 8px 24px rgba(124, 58, 237, 0.15);
+}
+
+.mode-card:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.mode-card-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 9px;
+  background: var(--bg-soft);
+  color: var(--accent-light);
+  flex-shrink: 0;
+}
+
+.mode-card.active .mode-card-icon {
+  background: linear-gradient(135deg, var(--accent), var(--accent-deep));
+  color: white;
+  box-shadow: 0 4px 12px var(--accent-glow);
+}
+
+.mode-card-text { min-width: 0; }
+
+.mode-card-label {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 0.95rem;
+  color: var(--text);
+  margin-bottom: 0.1rem;
+}
+
+.mode-card-desc {
+  font-size: 0.78rem;
+  color: var(--text-dim);
+}
+
+/* Format cards (notes) */
+.format-cards {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.75rem;
+}
+
+@media (max-width: 600px) { .format-cards { grid-template-columns: 1fr; } }
+
+.format-card {
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1rem 1.1rem;
+  cursor: pointer;
+  transition: all var(--t-mid);
+  text-align: left;
+  font-family: inherit;
+}
+
+.format-card:hover { border-color: var(--border-strong); transform: translateY(-2px); }
+
+.format-card.active {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+  box-shadow: 0 0 0 2px var(--accent-bg);
+}
+
+.format-card-title {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 1rem;
+  color: var(--text);
+  margin-bottom: 0.3rem;
+}
+
+.format-card-desc {
+  font-size: 0.85rem;
+  color: var(--text-dim);
+  line-height: 1.45;
+}
+
+/* Progress bar (flashcards) */
+.progress-bar {
+  width: 100%;
+  height: 6px;
+  background: var(--bg-soft);
+  border-radius: 3px;
+  overflow: hidden;
+  position: relative;
+}
+
+.progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), var(--accent-light));
+  border-radius: 3px;
+  transition: width 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+  box-shadow: 0 0 12px var(--accent-glow);
+}
+
+/* Flashcard 3D flip */
+.flashcard {
+  margin: 1.5rem 0 1rem;
+  perspective: 1500px;
+  cursor: pointer;
+  height: 280px;
+  user-select: none;
+}
+
+.flashcard-inner {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  transform-style: preserve-3d;
+  transition: transform 0.6s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.flashcard.flipped .flashcard-inner {
+  transform: rotateY(180deg);
+}
+
+.flashcard-face {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem;
+  border-radius: var(--radius-lg);
+  -webkit-backface-visibility: hidden;
+  backface-visibility: hidden;
+  text-align: center;
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-md);
+}
+
+.flashcard-front {
+  background: var(--surface);
+}
+
+.flashcard-back {
+  background: linear-gradient(135deg, var(--accent-deep), var(--accent));
+  color: white;
+  transform: rotateY(180deg);
+  border-color: var(--accent);
+  box-shadow: var(--shadow-md), 0 0 40px rgba(124, 58, 237, 0.3);
+}
+
+.flashcard-label {
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-dim);
+  margin-bottom: 0.85rem;
+  font-family: var(--font-mono);
+}
+
+.flashcard-back .flashcard-label { color: rgba(255, 255, 255, 0.7); }
+
+.flashcard-text {
+  font-family: var(--font-display);
+  font-size: 1.4rem;
+  font-weight: 500;
+  line-height: 1.4;
+  margin-bottom: 1rem;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  letter-spacing: -0.01em;
+  word-break: break-word;
+}
+
+.flashcard-back .flashcard-text {
+  font-family: var(--font-body);
+  font-size: 1.1rem;
+  font-weight: 400;
+  line-height: 1.55;
+}
+
+.flashcard-hint {
+  font-size: 0.78rem;
+  color: var(--text-fade);
+  margin-top: auto;
+}
+
+.flashcard-back .flashcard-hint { color: rgba(255, 255, 255, 0.6); }
+
+/* Grade buttons */
+.grade-row {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+  animation: fadeUp 0.3s ease-out;
+}
+
+.grade-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  padding: 1rem 0.5rem;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  font-family: inherit;
+  font-weight: 600;
+  transition: all var(--t-mid);
+  position: relative;
+}
+
+.grade-btn:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.grade-btn .grade-label {
+  font-size: 0.92rem;
+  margin-bottom: 0.15rem;
+}
+
+.grade-btn .grade-key {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--text-fade);
+  background: var(--bg-soft);
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+  display: inline-block;
+}
+
+.grade-btn.grade-again { border-color: rgba(248, 113, 113, 0.4); }
+.grade-btn.grade-again:hover { background: var(--error-bg); border-color: var(--error); }
+
+.grade-btn.grade-hard { border-color: rgba(251, 191, 36, 0.4); }
+.grade-btn.grade-hard:hover { background: rgba(251, 191, 36, 0.1); border-color: #fbbf24; }
+
+.grade-btn.grade-good { border-color: var(--accent-border); }
+.grade-btn.grade-good:hover { background: var(--accent-bg); border-color: var(--accent); }
+
+.grade-btn.grade-easy { border-color: rgba(74, 222, 128, 0.4); }
+.grade-btn.grade-easy:hover { background: var(--success-bg); border-color: var(--success); }
+
+@media (max-width: 480px) {
+  .grade-row { grid-template-columns: repeat(2, 1fr); }
+  .flashcard { height: 240px; }
+  .flashcard-text { font-size: 1.15rem; }
+}
+
+/* ============================================================
+   Study notes article (Markdown)
+   ============================================================ */
+.notes-article {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 2.5rem;
+  line-height: 1.7;
+  color: var(--text-secondary);
+  animation: fadeUp 0.4s ease-out;
+}
+
+.notes-article h1, .notes-article h2, .notes-article h3, .notes-article h4 {
+  font-family: var(--font-display);
+  color: var(--text);
+  font-weight: 700;
+  letter-spacing: -0.015em;
+}
+
+.notes-article h1 {
+  font-size: 1.85rem;
+  margin-bottom: 1rem;
+  padding-bottom: 0.6rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.notes-article h2 {
+  font-size: 1.4rem;
+  margin: 2rem 0 0.85rem;
+  color: var(--accent-light);
+}
+
+.notes-article h3 {
+  font-size: 1.15rem;
+  margin: 1.4rem 0 0.6rem;
+  color: var(--text);
+}
+
+.notes-article h4 {
+  font-size: 1rem;
+  margin: 1rem 0 0.4rem;
+}
+
+.notes-article p {
+  margin: 0.85rem 0;
+  font-size: 1rem;
+}
+
+.notes-article ul, .notes-article ol {
+  margin: 0.75rem 0 0.85rem 1.5rem;
+}
+
+.notes-article li {
+  margin: 0.4rem 0;
+  font-size: 0.97rem;
+}
+
+.notes-article strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.notes-article em { color: var(--accent-light); }
+
+.notes-article code {
+  font-family: var(--font-mono);
+  font-size: 0.88em;
+  background: var(--bg-soft);
+  padding: 0.12rem 0.4rem;
+  border-radius: 4px;
+  color: var(--accent-light);
+}
+
+.notes-article pre {
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.9rem 1rem;
+  overflow-x: auto;
+  margin: 0.85rem 0;
+}
+
+.notes-article pre code {
+  background: none;
+  padding: 0;
+  color: var(--text);
+}
+
+.notes-article blockquote {
+  border-left: 3px solid var(--accent);
+  padding: 0.4rem 1.1rem;
+  margin: 0.85rem 0;
+  color: var(--text-dim);
+  font-style: italic;
+  background: var(--bg-soft);
+  border-radius: 0 var(--radius) var(--radius) 0;
+}
+
+.notes-article a {
+  color: var(--accent-light);
+  text-decoration: underline;
+  text-decoration-color: rgba(167, 139, 250, 0.4);
+}
+
+.notes-article a:hover { text-decoration-color: var(--accent-light); }
+
+@media (max-width: 600px) {
+  .notes-article { padding: 1.5rem 1.25rem; }
+}
+
+/* Print/PDF stylesheet */
+@media print {
+  body {
+    background: white;
+    color: black;
+  }
+  body::before, body::after { display: none; }
+  .navbar, .no-print, .chat-bubble, .chat-panel { display: none !important; }
+  .container { max-width: 100%; padding: 0; }
+  .notes-article {
+    background: white;
+    color: black;
+    border: none;
+    box-shadow: none;
+    padding: 1rem 0;
+  }
+  .notes-article h1, .notes-article h2, .notes-article h3, .notes-article h4 {
+    color: black;
+    page-break-after: avoid;
+  }
+  .notes-article h2 { color: #5b21b6; }
+  .notes-article em { color: #5b21b6; }
+  .notes-article code, .notes-article pre {
+    background: #f5f5f5;
+    color: black;
+    border: 1px solid #ddd;
+  }
+  .notes-article a { color: #5b21b6; }
+  .notes-article p, .notes-article li { font-size: 11pt; line-height: 1.6; }
+}
+/* ============================================================
+   v5 STYLES — Teacher dashboard, classroom, analytics
+   Append to existing styles.css
+   ============================================================ */
+
+/* Back link */
+.back-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  color: var(--text-dim);
+  text-decoration: none;
+  font-size: 0.85rem;
+  font-weight: 500;
+  margin-bottom: 1rem;
+  transition: all var(--t-mid);
+}
+
+.back-link:hover { color: var(--accent-light); transform: translateX(-2px); }
+
+/* Class code box */
+.class-code-box {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 1.25rem;
+  background: linear-gradient(135deg, var(--accent-bg-strong), var(--accent-bg));
+  border: 1px solid var(--accent-border);
+  border-radius: var(--radius);
+}
+
+.class-code-text {
+  font-family: var(--font-mono);
+  font-size: 1.6rem;
+  font-weight: 700;
+  letter-spacing: 0.15em;
+  color: var(--accent-light);
+  text-shadow: 0 0 20px var(--accent-glow);
+}
+
+/* Member list */
+.member-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 0.5rem;
+}
+
+.member-row {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  padding: 0.6rem 0.85rem;
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  transition: all var(--t-mid);
+}
+
+.member-row:hover { border-color: var(--border-strong); }
+
+.member-avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--accent), var(--accent-deep));
+  color: white;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 0.95rem;
+  flex-shrink: 0;
+  box-shadow: 0 2px 8px var(--accent-glow);
+}
+
+.member-info { flex: 1; min-width: 0; }
+.member-name { font-weight: 500; color: var(--text); font-size: 0.9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.member-joined { font-size: 0.72rem; color: var(--text-fade); font-family: var(--font-mono); }
+
+/* Assignment list */
+.assignment-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.assignment-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.85rem 1rem;
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  transition: all var(--t-mid);
+}
+
+.assignment-row:hover { border-color: var(--accent-border); }
+
+.assignment-row.past-due { opacity: 0.65; }
+
+.assignment-main { flex: 1; min-width: 0; }
+
+.assignment-title {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 1rem;
+  color: var(--text);
+  margin-bottom: 0.2rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.assignment-meta {
+  font-size: 0.78rem;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+
+.due-future { color: var(--accent-light); }
+.due-past { color: var(--error); }
+
+.assignment-actions {
+  display: flex;
+  gap: 0.4rem;
+  flex-shrink: 0;
+}
+
+/* Stats grid */
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 1.25rem;
+}
+
+.stat-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1.25rem 1rem;
+  text-align: center;
+  position: relative;
+  overflow: hidden;
+  transition: all var(--t-mid);
+}
+
+.stat-card:hover {
+  border-color: var(--accent-border);
+  transform: translateY(-2px);
+}
+
+.stat-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  background: var(--accent-bg);
+  color: var(--accent-light);
+  border-radius: 9px;
+  margin-bottom: 0.5rem;
+}
+
+.stat-value {
+  font-family: var(--font-display);
+  font-size: 2rem;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--text);
+  margin-bottom: 0.25rem;
+  letter-spacing: -0.02em;
+}
+
+.stat-label {
+  font-size: 0.78rem;
+  color: var(--text-dim);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+/* Submission list */
+.submission-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.submission-row {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  padding: 0.7rem 0.9rem;
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  transition: all var(--t-mid);
+}
+
+.submission-row:hover { border-color: var(--border-strong); }
+
+.submission-rank {
+  width: 36px;
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+
+.submission-info { flex: 1; min-width: 0; }
+.submission-name { font-weight: 500; color: var(--text); font-size: 0.92rem; }
+.submission-time { font-size: 0.72rem; color: var(--text-fade); font-family: var(--font-mono); }
+
+.submission-score {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.1rem;
+  flex-shrink: 0;
+}
+
+.submission-score strong {
+  font-family: var(--font-display);
+  font-size: 1.2rem;
+  font-weight: 700;
+}
+
+.submission-fraction {
+  font-size: 0.72rem;
+  color: var(--text-fade);
+  font-family: var(--font-mono);
+}
+
+/* Question summary list (analytics) */
+.question-summary-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.question-summary-row {
+  display: flex;
+  gap: 0.85rem;
+  padding: 0.85rem 1rem;
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.question-summary-num {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--text-dim);
+  font-weight: 700;
+  flex-shrink: 0;
+  width: 24px;
+  text-align: center;
+  padding-top: 0.15rem;
+}
+
+.question-summary-info { flex: 1; min-width: 0; }
+
+.question-summary-text {
+  color: var(--text);
+  font-size: 0.95rem;
+  margin-bottom: 0.35rem;
+  line-height: 1.45;
+}
+
+.question-summary-meta {
+  font-size: 0.78rem;
+  color: var(--text-dim);
+}
+
+@media (max-width: 600px) {
+  .assignment-row { flex-direction: column; align-items: stretch; }
+  .assignment-actions { justify-content: flex-end; }
+  .class-code-box { flex-direction: column; align-items: stretch; gap: 0.75rem; }
+  .class-code-text { text-align: center; }
+}

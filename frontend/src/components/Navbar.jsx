@@ -1,5 +1,5 @@
 import { NavLink, Link } from 'react-router-dom'
-import { Brain } from 'lucide-react'
+import { Brain, GraduationCap } from 'lucide-react'
 
 export default function Navbar() {
   return (
@@ -16,6 +16,13 @@ export default function Navbar() {
         </NavLink>
         <NavLink to="/history" className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}>
           History
+        </NavLink>
+        <NavLink to="/teacher" className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}>
+          <GraduationCap size={14} style={{ verticalAlign: 'middle', marginRight: 4 }} />
+          Teacher
+        </NavLink>
+        <NavLink to="/join" className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}>
+          Join class
         </NavLink>
       </div>
     </nav>

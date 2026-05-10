@@ -1,11 +1,13 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import {
   Upload, FileText, Sparkles, CheckCircle2, XCircle, RotateCcw, BookOpen,
   Loader2, Video as Youtube, Clock, Plus, X, Lightbulb, ArrowRight, ArrowLeft,
+  Layers, ScrollText, Brain,
 } from 'lucide-react'
 import {
   uploadPdf, generateQuiz, fetchYoutubeTranscript, pasteYoutubeTranscript,
-  extractConcepts,
+  extractConcepts, generateFlashcardsFromText, generateNotes, listQuizzes,
+  generateFlashcardsFromQuiz,
 } from '../api'
 import ChatWidget from '../ChatWidget'
 
@@ -24,10 +26,32 @@ const DIFFICULTY_LABELS = {
 let sourceIdCounter = 0
 const newSourceId = () => `src-${++sourceIdCounter}`
 
+// Persist sources across quiz generations so the user CAN reuse them via toggle
+const SAVED_KEY = 'driquiz_saved_sources_v1'
+const loadSavedSources = () => {
+  try {
+    const raw = sessionStorage.getItem(SAVED_KEY)
+    if (!raw) return []
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed) ? parsed : []
+  } catch (_) { return [] }
+}
+const persistSavedSources = (arr) => {
+  try { sessionStorage.setItem(SAVED_KEY, JSON.stringify(arr)) } catch (_) {}
+}
+
 export default function CreateQuiz() {
+  const [mode, setMode] = useState('quiz') // 'quiz' | 'flashcards' | 'notes'
   const [step, setStep] = useState('input') // 'input' | 'concepts' | 'settings'
-  const [sources, setSources] = useState([])
+  const [sources, setSources] = useState([])  // current quiz's sources only
+  const [savedSources, setSavedSources] = useState([])  // previously added in this session
+  const [combineWithSaved, setCombineWithSaved] = useState(false)
   const [title, setTitle] = useState('')
+
+  // Load any saved sources from this session on mount
+  useEffect(() => {
+    setSavedSources(loadSavedSources())
+  }, [])
 
   // Concept extraction
   const [concepts, setConcepts] = useState([])
@@ -44,20 +68,18 @@ export default function CreateQuiz() {
   const [loadingMsg, setLoadingMsg] = useState('')
   const [error, setError] = useState('')
 
-  // Combine all sources into one text payload
-  const combinedText = sources.map(s => s.text).join('\n\n---\n\n')
+  // Combine sources based on toggle: current always, saved only if toggle on
+  const effectiveSources = combineWithSaved ? [...sources, ...savedSources] : sources
+  const combinedText = effectiveSources.map(s => s.text).join('\n\n---\n\n')
   const totalChars = combinedText.length
 
-  // Determine the source_type to send the backend (for chunking strategy)
   const aggregateSourceType = () => {
-    if (sources.length === 0) return 'text'
-    if (sources.length === 1) return sources[0].kind
+    if (effectiveSources.length === 0) return 'text'
+    if (effectiveSources.length === 1) return effectiveSources[0].kind
     return 'multi'
   }
-
-  // Get the youtube video id if there's exactly one YouTube source
   const aggregateYoutubeVideoId = () => {
-    const ytSources = sources.filter(s => s.kind === 'youtube')
+    const ytSources = effectiveSources.filter(s => s.kind === 'youtube')
     return ytSources.length === 1 ? ytSources[0].youtube_video_id : null
   }
 
@@ -110,19 +132,27 @@ export default function CreateQuiz() {
     setStep('settings')
   }
 
-  const handleGenerate = async () => {
+  const persistAndRedirect = (path) => {
+    const merged = [...savedSources]
+    sources.forEach(s => {
+      if (!merged.some(m => m.text === s.text)) merged.push(s)
+    })
+    persistSavedSources(merged.slice(-10))
+    window.location.href = path
+  }
+
+  const focusConceptNames = () => concepts.length > 0
+    ? Array.from(selectedConcepts).map(i => concepts[i].name)
+    : null
+
+  const handleGenerateQuiz = async () => {
     if (questionTypes.length === 0) {
       setError('Select at least one question type.')
       return
     }
     setError('')
     setLoading(true)
-    setLoadingMsg('Generating quiz... (this may take 20-40 seconds)')
-
-    const focusConcepts = concepts.length > 0
-      ? Array.from(selectedConcepts).map(i => concepts[i].name)
-      : null
-
+    setLoadingMsg('Generating quiz... (20-40 seconds)')
     try {
       const data = await generateQuiz({
         text: combinedText,
@@ -132,12 +162,55 @@ export default function CreateQuiz() {
         title: title || (sources[0]?.label || 'Untitled Quiz'),
         source_type: aggregateSourceType(),
         youtube_video_id: aggregateYoutubeVideoId(),
-        focus_concepts: focusConcepts,
+        focus_concepts: focusConceptNames(),
       })
-      // Navigate to the public quiz page so they can take it (and share)
-      window.location.href = `/q/${data.id}`
+      persistAndRedirect(`/q/${data.id}`)
     } catch (err) {
       setError(err.response?.data?.detail || 'Error generating quiz.')
+      setLoading(false)
+      setLoadingMsg('')
+    }
+  }
+
+  const handleGenerateFlashcards = async (settings) => {
+    setError('')
+    setLoading(true)
+    setLoadingMsg('Generating flashcards...')
+    try {
+      let data
+      if (settings.from === 'quiz') {
+        data = await generateFlashcardsFromQuiz(settings.quizId, title || null)
+      } else {
+        data = await generateFlashcardsFromText({
+          text: combinedText,
+          count: settings.count,
+          format: settings.format,
+          title: title || (sources[0]?.label || 'Untitled Flashcards'),
+          focus_concepts: focusConceptNames(),
+        })
+      }
+      persistAndRedirect(`/flashcards/${data.id}`)
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Error generating flashcards.')
+      setLoading(false)
+      setLoadingMsg('')
+    }
+  }
+
+  const handleGenerateNotes = async (settings) => {
+    setError('')
+    setLoading(true)
+    setLoadingMsg('Writing study notes... (15-30 seconds)')
+    try {
+      const data = await generateNotes({
+        text: combinedText,
+        format: settings.format,
+        title: title || (sources[0]?.label || 'Untitled Notes'),
+        focus_concepts: focusConceptNames(),
+      })
+      persistAndRedirect(`/notes/${data.id}`)
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Error generating notes.')
       setLoading(false)
       setLoadingMsg('')
     }
@@ -153,6 +226,8 @@ export default function CreateQuiz() {
 
         {error && <div className="alert alert-error">⚠️ {error}</div>}
 
+        <ModePicker mode={mode} setMode={setMode} disabled={step !== 'input'} />
+
         {/* STEP INDICATOR */}
         <div className="step-indicator">
           <div className={`step-dot ${step === 'input' ? 'active' : 'done'}`}>1</div>
@@ -167,6 +242,10 @@ export default function CreateQuiz() {
             sources={sources}
             setSources={setSources}
             removeSource={removeSource}
+            savedSources={savedSources}
+            setSavedSources={setSavedSources}
+            combineWithSaved={combineWithSaved}
+            setCombineWithSaved={setCombineWithSaved}
             title={title}
             setTitle={setTitle}
             totalChars={totalChars}
@@ -187,7 +266,7 @@ export default function CreateQuiz() {
           />
         )}
 
-        {step === 'settings' && (
+        {step === 'settings' && mode === 'quiz' && (
           <SettingsStep
             numQuestions={numQuestions}
             setNumQuestions={setNumQuestions}
@@ -195,12 +274,30 @@ export default function CreateQuiz() {
             setDifficulty={setDifficulty}
             questionTypes={questionTypes}
             setQuestionTypes={setQuestionTypes}
-            handleGenerate={handleGenerate}
+            handleGenerate={handleGenerateQuiz}
             back={() => setStep(concepts.length > 0 ? 'concepts' : 'input')}
             loading={loading}
             loadingMsg={loadingMsg}
             sourceCount={sources.length}
             conceptCount={selectedConcepts.size}
+          />
+        )}
+
+        {step === 'settings' && mode === 'flashcards' && (
+          <FlashcardSettingsStep
+            handleGenerate={handleGenerateFlashcards}
+            back={() => setStep(concepts.length > 0 ? 'concepts' : 'input')}
+            loading={loading}
+            loadingMsg={loadingMsg}
+          />
+        )}
+
+        {step === 'settings' && mode === 'notes' && (
+          <NotesSettingsStep
+            handleGenerate={handleGenerateNotes}
+            back={() => setStep(concepts.length > 0 ? 'concepts' : 'input')}
+            loading={loading}
+            loadingMsg={loadingMsg}
           />
         )}
       </div>
@@ -213,9 +310,21 @@ export default function CreateQuiz() {
 /* ============================================================
    STEP 1: INPUT (multi-source bag)
    ============================================================ */
-function InputStep({ sources, setSources, removeSource, title, setTitle, totalChars, handleExtractConcepts, extracting, setError }) {
+function InputStep({
+  sources, setSources, removeSource,
+  savedSources, setSavedSources,
+  combineWithSaved, setCombineWithSaved,
+  title, setTitle, totalChars, handleExtractConcepts, extracting, setError,
+}) {
   const [adderOpen, setAdderOpen] = useState(sources.length === 0)
-  const [adderType, setAdderType] = useState('text') // 'text' | 'pdf' | 'youtube'
+  const [adderType, setAdderType] = useState('text')
+
+  const clearSaved = () => {
+    if (!confirm('Clear all your saved sources from this session?')) return
+    setSavedSources([])
+    persistSavedSources([])
+    setCombineWithSaved(false)
+  }
 
   return (
     <>
@@ -257,6 +366,39 @@ function InputStep({ sources, setSources, removeSource, title, setTitle, totalCh
           />
         )}
       </div>
+
+      {savedSources.length > 0 && sources.length > 0 && (
+        <div className="card">
+          <h2><BookOpen size={20} /> Saved sources from earlier</h2>
+          <p className="text-info" style={{ marginBottom: '0.85rem' }}>
+            You added {savedSources.length} source{savedSources.length === 1 ? '' : 's'} earlier in this session. By default the new quiz uses ONLY what you added above. Toggle below to also include those.
+          </p>
+          <label className={`checkbox-item ${combineWithSaved ? 'checked' : ''}`} style={{ width: '100%', marginBottom: '0.5rem' }}>
+            <input
+              type="checkbox"
+              checked={combineWithSaved}
+              onChange={(e) => setCombineWithSaved(e.target.checked)}
+            />
+            Also include my {savedSources.length} saved source{savedSources.length === 1 ? '' : 's'}
+          </label>
+          {combineWithSaved && (
+            <div className="sources-list" style={{ marginTop: '0.75rem' }}>
+              {savedSources.map((s, i) => (
+                <div key={i} className="source-chip" style={{ opacity: 0.85 }}>
+                  <SourceIcon kind={s.kind} />
+                  <div className="source-chip-info">
+                    <div className="source-chip-label">{s.label}</div>
+                    <div className="source-chip-meta">{s.text.length.toLocaleString()} chars · saved earlier</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+          <button className="btn-ghost-small" onClick={clearSaved} style={{ marginTop: '0.5rem' }}>
+            Clear saved sources
+          </button>
+        </div>
+      )}
 
       {sources.length > 0 && (
         <div className="card">
@@ -619,3 +761,158 @@ function SettingsStep({
     </div>
   )
 }
+
+/* ============================================================
+   MODE PICKER
+   ============================================================ */
+function ModePicker({ mode, setMode, disabled }) {
+  const modes = [
+    { id: 'quiz', label: 'Quiz', icon: <Sparkles size={16} />, desc: 'Test your knowledge' },
+    { id: 'flashcards', label: 'Flashcards', icon: <Layers size={16} />, desc: 'Spaced repetition' },
+    { id: 'notes', label: 'Study Notes', icon: <ScrollText size={16} />, desc: 'AI summary' },
+  ]
+  return (
+    <div className="mode-picker">
+      {modes.map(m => (
+        <button
+          key={m.id}
+          className={`mode-card ${mode === m.id ? 'active' : ''}`}
+          onClick={() => !disabled && setMode(m.id)}
+          disabled={disabled && mode !== m.id}
+          title={disabled ? 'Mode locked while in progress' : ''}
+        >
+          <div className="mode-card-icon">{m.icon}</div>
+          <div className="mode-card-text">
+            <div className="mode-card-label">{m.label}</div>
+            <div className="mode-card-desc">{m.desc}</div>
+          </div>
+        </button>
+      ))}
+    </div>
+  )
+}
+
+/* ============================================================
+   FLASHCARD SETTINGS
+   ============================================================ */
+function FlashcardSettingsStep({ handleGenerate, back, loading, loadingMsg }) {
+  const [from, setFrom] = useState('material') // 'material' | 'quiz'
+  const [count, setCount] = useState(10)
+  const [format, setFormat] = useState('term_definition')
+  const [quizzes, setQuizzes] = useState([])
+  const [quizId, setQuizId] = useState('')
+  const [loadingQuizzes, setLoadingQuizzes] = useState(false)
+
+  useEffect(() => {
+    if (from === 'quiz' && quizzes.length === 0) {
+      setLoadingQuizzes(true)
+      listQuizzes()
+        .then(setQuizzes)
+        .catch(() => {})
+        .finally(() => setLoadingQuizzes(false))
+    }
+  }, [from])
+
+  const submit = () => {
+    if (from === 'quiz' && !quizId) {
+      alert('Pick a quiz to convert.')
+      return
+    }
+    handleGenerate({ from, count, format, quizId })
+  }
+
+  return (
+    <div className="card">
+      <h2><Layers size={20} /> Flashcard settings</h2>
+
+      <div className="field">
+        <label className="label">Source</label>
+        <div className="tabs">
+          <button className={`tab ${from === 'material' ? 'active' : ''}`} onClick={() => setFrom('material')}>
+            From material
+          </button>
+          <button className={`tab ${from === 'quiz' ? 'active' : ''}`} onClick={() => setFrom('quiz')}>
+            From a past quiz
+          </button>
+        </div>
+      </div>
+
+      {from === 'material' && (
+        <>
+          <div className="row">
+            <div className="field">
+              <label className="label">Cards: {count}</label>
+              <input type="range" min="3" max="30" value={count} onChange={(e) => setCount(Number(e.target.value))} style={{ width: '100%' }} />
+            </div>
+            <div className="field">
+              <label className="label">Format</label>
+              <select className="select" value={format} onChange={(e) => setFormat(e.target.value)}>
+                <option value="term_definition">Term / Definition</option>
+                <option value="question_answer">Question / Answer</option>
+              </select>
+            </div>
+          </div>
+        </>
+      )}
+
+      {from === 'quiz' && (
+        <div className="field">
+          <label className="label">Pick a quiz</label>
+          {loadingQuizzes && <div className="text-info"><Loader2 size={14} className="spinner" /> Loading...</div>}
+          {!loadingQuizzes && quizzes.length === 0 && (
+            <div className="text-info">No past quizzes yet. Create one first or use "From material".</div>
+          )}
+          {!loadingQuizzes && quizzes.length > 0 && (
+            <select className="select" value={quizId} onChange={(e) => setQuizId(e.target.value)}>
+              <option value="">— Select a quiz —</option>
+              {quizzes.map(q => (
+                <option key={q.id} value={q.id}>
+                  {q.title} ({q.num_questions} Q)
+                </option>
+              ))}
+            </select>
+          )}
+        </div>
+      )}
+
+      <div className="button-row" style={{ marginTop: '1.5rem' }}>
+        <button className="btn" onClick={submit} disabled={loading || (from === 'quiz' && !quizId)}>
+          {loading ? <><Loader2 size={18} className="spinner" /> {loadingMsg}</> : <><Layers size={18} /> Generate Flashcards</>}
+        </button>
+        <button className="btn btn-secondary" onClick={back} disabled={loading}><ArrowLeft size={16} /> Back</button>
+      </div>
+    </div>
+  )
+}
+
+/* ============================================================
+   NOTES SETTINGS
+   ============================================================ */
+function NotesSettingsStep({ handleGenerate, back, loading, loadingMsg }) {
+  const [format, setFormat] = useState('guide')
+  return (
+    <div className="card">
+      <h2><ScrollText size={20} /> Study notes settings</h2>
+      <div className="field">
+        <label className="label">Format</label>
+        <div className="format-cards">
+          <button className={`format-card ${format === 'summary' ? 'active' : ''}`} onClick={() => setFormat('summary')}>
+            <div className="format-card-title">Quick Summary</div>
+            <div className="format-card-desc">Brief overview with bullet points. Best for quick review.</div>
+          </button>
+          <button className={`format-card ${format === 'guide' ? 'active' : ''}`} onClick={() => setFormat('guide')}>
+            <div className="format-card-title">Study Guide</div>
+            <div className="format-card-desc">Detailed structure with concepts, examples, and glossary.</div>
+          </button>
+        </div>
+      </div>
+      <div className="button-row" style={{ marginTop: '1.5rem' }}>
+        <button className="btn" onClick={() => handleGenerate({ format })} disabled={loading}>
+          {loading ? <><Loader2 size={18} className="spinner" /> {loadingMsg}</> : <><ScrollText size={18} /> Generate Notes</>}
+        </button>
+        <button className="btn btn-secondary" onClick={back} disabled={loading}><ArrowLeft size={16} /> Back</button>
+      </div>
+    </div>
+  )
+}
+

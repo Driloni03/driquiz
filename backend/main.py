@@ -88,6 +88,66 @@ def init_db():
             )
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_leaderboard_quiz ON leaderboard(quiz_id, percentage DESC)")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS flashcard_sets (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                source_text_preview TEXT,
+                cards_json TEXT NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS study_notes (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                source_text_preview TEXT,
+                format TEXT DEFAULT 'summary',
+                content_md TEXT NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS classes (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                code TEXT NOT NULL UNIQUE,
+                teacher_name TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_classes_code ON classes(code)")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS class_memberships (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                class_id TEXT NOT NULL,
+                student_name TEXT NOT NULL,
+                joined_at TEXT NOT NULL,
+                FOREIGN KEY (class_id) REFERENCES classes(id) ON DELETE CASCADE
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_membership_class ON class_memberships(class_id)")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS assignments (
+                id TEXT PRIMARY KEY,
+                class_id TEXT NOT NULL,
+                quiz_id TEXT NOT NULL,
+                due_at TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (class_id) REFERENCES classes(id) ON DELETE CASCADE,
+                FOREIGN KEY (quiz_id) REFERENCES quizzes(id)
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_assignments_class ON assignments(class_id)")
+        # Add class_id and assignment_id to leaderboard for class-scoped scores
+        for sql in [
+            "ALTER TABLE leaderboard ADD COLUMN class_id TEXT",
+            "ALTER TABLE leaderboard ADD COLUMN assignment_id TEXT",
+        ]:
+            try:
+                conn.execute(sql)
+            except sqlite3.OperationalError:
+                pass
 
         # Migrate older DBs
         for sql in [
@@ -519,6 +579,8 @@ REQUIREMENTS:
 - Difficulty: {difficulty}
 - Allowed question types: {types}
 {focus_block}
+CRITICAL: Generate ONLY questions of the allowed types listed above. If only "multiple_choice" is allowed, EVERY question must be multiple_choice. If only "true_false" is allowed, EVERY question must be true_false. Do NOT mix in other types under any circumstances.
+
 IMPORTANT INSTRUCTIONS:
 1. Questions must be based ONLY on the provided material - do not invent information.
 2. Each question must include a "source_chunk" that is a short citation (1-2 sentences) from the material justifying the correct answer.
@@ -589,6 +651,12 @@ def generate_questions_from_chunk(chunk, num_questions, difficulty, types, is_yo
     return data.get("questions", [])
 
 
+def _filter_by_types(questions, allowed_types):
+    """Drop any questions whose type isn't in the allowed list."""
+    allowed = set(allowed_types)
+    return [q for q in questions if q.get("type") in allowed]
+
+
 def build_quiz(text, num_questions, difficulty, types, title, source_type="text",
                youtube_video_id=None, focus_concepts=None) -> Quiz:
     is_youtube = source_type == "youtube"
@@ -608,7 +676,26 @@ def build_quiz(text, num_questions, difficulty, types, title, source_type="text"
             chunk, n, difficulty, types,
             is_youtube=is_youtube, focus_concepts=focus_concepts,
         ))
+
+    # Validate: drop any questions of wrong types and retry if needed
+    all_questions = _filter_by_types(all_questions, types)
+    retries = 0
+    while len(all_questions) < num_questions and retries < 2 and chunks_to_use:
+        retries += 1
+        needed = num_questions - len(all_questions)
+        # Use the first chunk for the retry
+        retry_qs = generate_questions_from_chunk(
+            chunks_to_use[0], needed, difficulty, types,
+            is_youtube=is_youtube, focus_concepts=focus_concepts,
+        )
+        all_questions.extend(_filter_by_types(retry_qs, types))
+
     all_questions = all_questions[:num_questions]
+    if not all_questions:
+        raise HTTPException(
+            status_code=500,
+            detail="Could not generate questions matching your selected types. Try adding more types or a different difficulty.",
+        )
     questions_list = []
     for q in all_questions:
         questions_list.append({
@@ -932,3 +1019,786 @@ def api_eli5(req: ELI5Request, request: Request):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+# ---------------------------------------------------------------------------
+# Flashcards
+# ---------------------------------------------------------------------------
+class Flashcard(BaseModel):
+    id: str
+    front: str
+    back: str
+    # SM-2 fields (managed client-side, but room for server-side later)
+    ease: Optional[float] = 2.5
+    interval: Optional[int] = 0
+    reps: Optional[int] = 0
+
+
+class FlashcardSet(BaseModel):
+    id: str
+    title: str
+    created_at: str
+    source_text_preview: str
+    cards: List[Flashcard]
+
+
+class GenerateFlashcardsFromTextRequest(BaseModel):
+    text: str = Field(..., min_length=100)
+    count: int = Field(default=10, ge=3, le=30)
+    format: Literal["term_definition", "question_answer"] = "term_definition"
+    title: Optional[str] = "Untitled Flashcards"
+    focus_concepts: Optional[List[str]] = None
+
+
+class GenerateFlashcardsFromQuizRequest(BaseModel):
+    quiz_id: str
+    title: Optional[str] = None
+
+
+def save_flashcard_set(fs_dict):
+    with get_db() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO flashcard_sets (id, title, created_at, source_text_preview, cards_json) VALUES (?,?,?,?,?)",
+            (fs_dict["id"], fs_dict["title"], fs_dict["created_at"],
+             fs_dict["source_text_preview"], json.dumps(fs_dict["cards"])),
+        )
+        conn.commit()
+
+
+def load_flashcard_set(set_id):
+    with get_db() as conn:
+        row = conn.execute("SELECT * FROM flashcard_sets WHERE id = ?", (set_id,)).fetchone()
+        if not row:
+            return None
+        return {
+            "id": row["id"], "title": row["title"], "created_at": row["created_at"],
+            "source_text_preview": row["source_text_preview"],
+            "cards": json.loads(row["cards_json"]),
+        }
+
+
+def list_flashcard_sets():
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT id, title, created_at, cards_json FROM flashcard_sets ORDER BY created_at DESC LIMIT 100"
+        ).fetchall()
+        return [{
+            "id": r["id"], "title": r["title"], "created_at": r["created_at"],
+            "num_cards": len(json.loads(r["cards_json"])),
+        } for r in rows]
+
+
+FLASHCARD_PROMPT = """You are an expert at creating effective flashcards for studying. Generate flashcards from the learning material below.
+
+LEARNING MATERIAL:
+\"\"\"
+{content}
+\"\"\"
+
+REQUIREMENTS:
+- Number of cards: {count}
+- Format: {format_desc}
+{focus_block}
+INSTRUCTIONS:
+- Cards must be based ONLY on the material - do not invent.
+- Each card has a "front" and "back".
+- Keep front concise (a term, concept, or question).
+- Back should be a clear, complete answer (1-3 sentences).
+- Cover diverse topics from the material - don't repeat similar cards.
+- Match the language of the source material.
+
+Respond with ONLY a valid JSON object:
+{{
+  "cards": [
+    {{"front": "...", "back": "..."}}
+  ]
+}}
+"""
+
+
+def generate_flashcards_from_text(text, count, format_kind, focus_concepts=None):
+    if format_kind == "term_definition":
+        format_desc = 'Term/Definition pairs. Front is a key term or concept. Back is its definition.'
+    else:
+        format_desc = 'Question/Answer pairs. Front is a clear question. Back is the answer.'
+
+    focus_block = ""
+    if focus_concepts:
+        concepts_str = ", ".join(f'"{c}"' for c in focus_concepts)
+        focus_block = f"- FOCUS on these concepts: {concepts_str}\n"
+
+    sample = text[:12000] if len(text) > 12000 else text
+    prompt = FLASHCARD_PROMPT.format(content=sample, count=count, format_desc=format_desc, focus_block=focus_block)
+
+    response = client.chat.completions.create(
+        model=DEPLOYMENT,
+        messages=[
+            {"role": "system", "content": "You generate flashcards as valid JSON only."},
+            {"role": "user", "content": prompt},
+        ],
+        response_format={"type": "json_object"},
+        temperature=0.6,
+        max_tokens=4096,
+    )
+    raw = response.choices[0].message.content.strip()
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=500, detail="Could not parse flashcard JSON.")
+    return data.get("cards", [])
+
+
+@app.post("/api/flashcards/generate-from-text", response_model=FlashcardSet)
+def api_generate_flashcards_from_text(req: GenerateFlashcardsFromTextRequest, request: Request):
+    check_quiz_rate_limit(request)
+    if len(req.text) > 50000:
+        raise HTTPException(status_code=400, detail="Text too long.")
+    raw_cards = generate_flashcards_from_text(req.text, req.count, req.format, req.focus_concepts)
+    cards = [{
+        "id": str(uuid.uuid4()),
+        "front": c.get("front", ""),
+        "back": c.get("back", ""),
+        "ease": 2.5, "interval": 0, "reps": 0,
+    } for c in raw_cards if c.get("front") and c.get("back")]
+    if not cards:
+        raise HTTPException(status_code=500, detail="No flashcards generated.")
+    fs = {
+        "id": str(uuid.uuid4()),
+        "title": req.title or "Untitled Flashcards",
+        "created_at": datetime.utcnow().isoformat(),
+        "source_text_preview": req.text[:300] + ("..." if len(req.text) > 300 else ""),
+        "cards": cards,
+    }
+    save_flashcard_set(fs)
+    return FlashcardSet(**fs)
+
+
+@app.post("/api/flashcards/generate-from-quiz", response_model=FlashcardSet)
+def api_generate_flashcards_from_quiz(req: GenerateFlashcardsFromQuizRequest, request: Request):
+    check_quiz_rate_limit(request)
+    quiz = load_quiz(req.quiz_id)
+    if not quiz:
+        raise HTTPException(status_code=404, detail="Quiz not found.")
+    cards = []
+    for q in quiz["questions"]:
+        # For multi-choice and short_answer, front=question, back=answer + explanation
+        front = q["question"]
+        back = q["correct_answer"]
+        if q.get("explanation"):
+            back += f"\n\n{q['explanation']}"
+        cards.append({
+            "id": str(uuid.uuid4()),
+            "front": front,
+            "back": back,
+            "ease": 2.5, "interval": 0, "reps": 0,
+        })
+    fs = {
+        "id": str(uuid.uuid4()),
+        "title": req.title or f"Flashcards: {quiz['title']}",
+        "created_at": datetime.utcnow().isoformat(),
+        "source_text_preview": quiz["source_text_preview"],
+        "cards": cards,
+    }
+    save_flashcard_set(fs)
+    return FlashcardSet(**fs)
+
+
+@app.get("/api/flashcards/{set_id}", response_model=FlashcardSet)
+def api_get_flashcards(set_id: str):
+    fs = load_flashcard_set(set_id)
+    if not fs:
+        raise HTTPException(status_code=404, detail="Flashcard set not found.")
+    return FlashcardSet(**fs)
+
+
+@app.get("/api/flashcards")
+def api_list_flashcards():
+    return {"sets": list_flashcard_sets()}
+
+
+# ---------------------------------------------------------------------------
+# Study Notes
+# ---------------------------------------------------------------------------
+class StudyNote(BaseModel):
+    id: str
+    title: str
+    created_at: str
+    source_text_preview: str
+    format: Literal["summary", "guide"]
+    content_md: str
+
+
+class GenerateNotesRequest(BaseModel):
+    text: str = Field(..., min_length=100)
+    format: Literal["summary", "guide"] = "guide"
+    title: Optional[str] = "Untitled Notes"
+    focus_concepts: Optional[List[str]] = None
+
+
+def save_note(note_dict):
+    with get_db() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO study_notes (id, title, created_at, source_text_preview, format, content_md) VALUES (?,?,?,?,?,?)",
+            (note_dict["id"], note_dict["title"], note_dict["created_at"],
+             note_dict["source_text_preview"], note_dict["format"], note_dict["content_md"]),
+        )
+        conn.commit()
+
+
+def load_note(note_id):
+    with get_db() as conn:
+        row = conn.execute("SELECT * FROM study_notes WHERE id = ?", (note_id,)).fetchone()
+        if not row:
+            return None
+        return dict(row)
+
+
+def list_notes():
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT id, title, created_at, format FROM study_notes ORDER BY created_at DESC LIMIT 100"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+SUMMARY_PROMPT = """Create a clear, concise study summary of the material below in Markdown.
+
+Use this structure:
+- Brief intro paragraph explaining what the material covers
+- 4-7 main points as a bulleted list
+- A short closing paragraph noting key takeaways
+
+Match the language of the source material. Be concise and accurate. Do not invent information not in the material.
+
+MATERIAL:
+\"\"\"
+{content}
+\"\"\"
+"""
+
+GUIDE_PROMPT = """Create a structured study guide in Markdown from the material below.
+
+Use this structure:
+# Study Guide: [Topic]
+
+## Overview
+2-3 sentence overview.
+
+## Key Concepts
+For each major concept, use a heading and explanation:
+### Concept name
+- Definition
+- Why it matters
+- Example or application
+
+## Key Terms
+A bulleted glossary: **term** — definition
+
+## Summary
+3-4 sentence wrap-up.
+
+Match the language of the source material. Be thorough but concise. Do not invent information not in the material.
+
+MATERIAL:
+\"\"\"
+{content}
+\"\"\"
+"""
+
+
+def generate_notes(text, format_kind, focus_concepts=None):
+    sample = text[:14000] if len(text) > 14000 else text
+    prompt = (GUIDE_PROMPT if format_kind == "guide" else SUMMARY_PROMPT).format(content=sample)
+    if focus_concepts:
+        concepts_str = ", ".join(f'"{c}"' for c in focus_concepts)
+        prompt += f"\n\nFOCUS especially on these concepts: {concepts_str}\n"
+
+    response = client.chat.completions.create(
+        model=DEPLOYMENT,
+        messages=[
+            {"role": "system", "content": "You write clear, well-organized study materials in Markdown."},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.5,
+        max_tokens=3000,
+    )
+    return response.choices[0].message.content.strip()
+
+
+@app.post("/api/notes/generate", response_model=StudyNote)
+def api_generate_notes(req: GenerateNotesRequest, request: Request):
+    check_quiz_rate_limit(request)
+    if len(req.text) > 50000:
+        raise HTTPException(status_code=400, detail="Text too long.")
+    content_md = generate_notes(req.text, req.format, req.focus_concepts)
+    note = {
+        "id": str(uuid.uuid4()),
+        "title": req.title or "Untitled Notes",
+        "created_at": datetime.utcnow().isoformat(),
+        "source_text_preview": req.text[:300] + ("..." if len(req.text) > 300 else ""),
+        "format": req.format,
+        "content_md": content_md,
+    }
+    save_note(note)
+    return StudyNote(**note)
+
+
+@app.get("/api/notes/{note_id}", response_model=StudyNote)
+def api_get_note(note_id: str):
+    note = load_note(note_id)
+    if not note:
+        raise HTTPException(status_code=404, detail="Note not found.")
+    return StudyNote(**note)
+
+
+@app.get("/api/notes")
+def api_list_notes():
+    return {"notes": list_notes()}
+
+
+# ===========================================================================
+# CLASSROOM / TEACHER FEATURES
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# Models
+# ---------------------------------------------------------------------------
+class ClassInfo(BaseModel):
+    id: str
+    name: str
+    code: str
+    teacher_name: str
+    created_at: str
+    student_count: int = 0
+    assignment_count: int = 0
+
+
+class CreateClassRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+    teacher_name: str = Field(..., min_length=1, max_length=80)
+
+
+class JoinClassRequest(BaseModel):
+    code: str
+    student_name: str = Field(..., min_length=1, max_length=80)
+
+
+class CreateAssignmentRequest(BaseModel):
+    class_id: str
+    quiz_id: str
+    due_at: Optional[str] = None  # ISO datetime string
+
+
+class SubmitAssignmentRequest(BaseModel):
+    assignment_id: str
+    student_name: str
+    answers: List[AnswerSubmission]
+
+
+# ---------------------------------------------------------------------------
+# DB helpers
+# ---------------------------------------------------------------------------
+def generate_class_code() -> str:
+    """8-char uppercase code, e.g. 'BIO-K9XM'."""
+    chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # no I,O,1,0 (confusing)
+    while True:
+        code = "".join(random.choices(chars, k=6))
+        # Check uniqueness
+        with get_db() as conn:
+            existing = conn.execute("SELECT 1 FROM classes WHERE code = ?", (code,)).fetchone()
+        if not existing:
+            return code
+
+
+def save_class(c):
+    with get_db() as conn:
+        conn.execute(
+            "INSERT INTO classes (id, name, code, teacher_name, created_at) VALUES (?,?,?,?,?)",
+            (c["id"], c["name"], c["code"], c["teacher_name"], c["created_at"]),
+        )
+        conn.commit()
+
+
+def load_class(class_id):
+    with get_db() as conn:
+        row = conn.execute("SELECT * FROM classes WHERE id = ?", (class_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def load_class_by_code(code):
+    with get_db() as conn:
+        row = conn.execute("SELECT * FROM classes WHERE code = ?", (code,)).fetchone()
+        return dict(row) if row else None
+
+
+def list_classes():
+    """List all classes (since we don't have auth, this is global - in real app filter by teacher)."""
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT id, name, code, teacher_name, created_at FROM classes ORDER BY created_at DESC LIMIT 200"
+        ).fetchall()
+        out = []
+        for r in rows:
+            class_id = r["id"]
+            students = conn.execute("SELECT COUNT(*) c FROM class_memberships WHERE class_id = ?", (class_id,)).fetchone()
+            assigns = conn.execute("SELECT COUNT(*) c FROM assignments WHERE class_id = ?", (class_id,)).fetchone()
+            d = dict(r)
+            d["student_count"] = students["c"]
+            d["assignment_count"] = assigns["c"]
+            out.append(d)
+        return out
+
+
+def add_membership(class_id, student_name):
+    with get_db() as conn:
+        # Don't add duplicate
+        existing = conn.execute(
+            "SELECT 1 FROM class_memberships WHERE class_id = ? AND student_name = ?",
+            (class_id, student_name),
+        ).fetchone()
+        if not existing:
+            conn.execute(
+                "INSERT INTO class_memberships (class_id, student_name, joined_at) VALUES (?,?,?)",
+                (class_id, student_name, datetime.utcnow().isoformat()),
+            )
+            conn.commit()
+
+
+def list_class_members(class_id):
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT student_name, joined_at FROM class_memberships WHERE class_id = ? ORDER BY joined_at DESC",
+            (class_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def save_assignment(a):
+    with get_db() as conn:
+        conn.execute(
+            "INSERT INTO assignments (id, class_id, quiz_id, due_at, created_at) VALUES (?,?,?,?,?)",
+            (a["id"], a["class_id"], a["quiz_id"], a.get("due_at"), a["created_at"]),
+        )
+        conn.commit()
+
+
+def load_assignment(assignment_id):
+    with get_db() as conn:
+        row = conn.execute("SELECT * FROM assignments WHERE id = ?", (assignment_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def list_class_assignments(class_id):
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT a.*, q.title as quiz_title, q.questions_json
+            FROM assignments a
+            JOIN quizzes q ON q.id = a.quiz_id
+            WHERE a.class_id = ?
+            ORDER BY a.created_at DESC
+        """, (class_id,)).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["num_questions"] = len(json.loads(d.pop("questions_json", "[]")))
+            # Submission count
+            sub = conn.execute(
+                "SELECT COUNT(*) c FROM leaderboard WHERE assignment_id = ?",
+                (d["id"],),
+            ).fetchone()
+            d["submission_count"] = sub["c"]
+            out.append(d)
+        return out
+
+
+def delete_class(class_id):
+    with get_db() as conn:
+        conn.execute("DELETE FROM assignments WHERE class_id = ?", (class_id,))
+        conn.execute("DELETE FROM class_memberships WHERE class_id = ?", (class_id,))
+        conn.execute("UPDATE leaderboard SET class_id = NULL WHERE class_id = ?", (class_id,))
+        conn.execute("DELETE FROM classes WHERE id = ?", (class_id,))
+        conn.commit()
+
+
+def delete_assignment(assignment_id):
+    with get_db() as conn:
+        conn.execute("UPDATE leaderboard SET assignment_id = NULL WHERE assignment_id = ?", (assignment_id,))
+        conn.execute("DELETE FROM assignments WHERE id = ?", (assignment_id,))
+        conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Class endpoints
+# ---------------------------------------------------------------------------
+@app.post("/api/classes", response_model=ClassInfo)
+def api_create_class(req: CreateClassRequest):
+    c = {
+        "id": str(uuid.uuid4()),
+        "name": req.name.strip(),
+        "code": generate_class_code(),
+        "teacher_name": req.teacher_name.strip(),
+        "created_at": datetime.utcnow().isoformat(),
+    }
+    save_class(c)
+    c["student_count"] = 0
+    c["assignment_count"] = 0
+    return ClassInfo(**c)
+
+
+@app.get("/api/classes")
+def api_list_classes():
+    return {"classes": list_classes()}
+
+
+@app.get("/api/classes/{class_id}")
+def api_get_class(class_id: str):
+    c = load_class(class_id)
+    if not c:
+        raise HTTPException(status_code=404, detail="Class not found.")
+    members = list_class_members(class_id)
+    assignments = list_class_assignments(class_id)
+    return {
+        "class": c,
+        "members": members,
+        "assignments": assignments,
+    }
+
+
+@app.delete("/api/classes/{class_id}")
+def api_delete_class(class_id: str):
+    if not load_class(class_id):
+        raise HTTPException(status_code=404, detail="Class not found.")
+    delete_class(class_id)
+    return {"deleted": class_id}
+
+
+@app.get("/api/classes/by-code/{code}")
+def api_class_by_code(code: str):
+    c = load_class_by_code(code.upper().strip())
+    if not c:
+        raise HTTPException(status_code=404, detail="Class not found. Check the code.")
+    # Public info - don't expose teacher details beyond name
+    return {
+        "id": c["id"],
+        "name": c["name"],
+        "code": c["code"],
+        "teacher_name": c["teacher_name"],
+    }
+
+
+@app.post("/api/classes/join")
+def api_join_class(req: JoinClassRequest):
+    c = load_class_by_code(req.code.upper().strip())
+    if not c:
+        raise HTTPException(status_code=404, detail="Class not found. Check the code.")
+    add_membership(c["id"], req.student_name.strip())
+    # Return active assignments for the student
+    assignments = list_class_assignments(c["id"])
+    return {
+        "class": {
+            "id": c["id"], "name": c["name"], "code": c["code"], "teacher_name": c["teacher_name"],
+        },
+        "student_name": req.student_name.strip(),
+        "assignments": assignments,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Assignment endpoints
+# ---------------------------------------------------------------------------
+@app.post("/api/assignments")
+def api_create_assignment(req: CreateAssignmentRequest):
+    if not load_class(req.class_id):
+        raise HTTPException(status_code=404, detail="Class not found.")
+    if not load_quiz(req.quiz_id):
+        raise HTTPException(status_code=404, detail="Quiz not found.")
+    a = {
+        "id": str(uuid.uuid4()),
+        "class_id": req.class_id,
+        "quiz_id": req.quiz_id,
+        "due_at": req.due_at,
+        "created_at": datetime.utcnow().isoformat(),
+    }
+    save_assignment(a)
+    return a
+
+
+@app.delete("/api/assignments/{assignment_id}")
+def api_delete_assignment(assignment_id: str):
+    if not load_assignment(assignment_id):
+        raise HTTPException(status_code=404, detail="Assignment not found.")
+    delete_assignment(assignment_id)
+    return {"deleted": assignment_id}
+
+
+@app.get("/api/assignments/{assignment_id}")
+def api_get_assignment(assignment_id: str):
+    a = load_assignment(assignment_id)
+    if not a:
+        raise HTTPException(status_code=404, detail="Assignment not found.")
+    quiz = load_quiz(a["quiz_id"])
+    cls = load_class(a["class_id"])
+    return {
+        "assignment": a,
+        "quiz": quiz,
+        "class": cls,
+    }
+
+
+@app.post("/api/assignments/submit")
+def api_submit_assignment(req: SubmitAssignmentRequest):
+    a = load_assignment(req.assignment_id)
+    if not a:
+        raise HTTPException(status_code=404, detail="Assignment not found.")
+    quiz = load_quiz(a["quiz_id"])
+    if not quiz:
+        raise HTTPException(status_code=404, detail="Quiz not found.")
+    correct, total, pct, results = _score_quiz(quiz, req.answers)
+    name = req.student_name.strip() or random_animal_name()
+    # Save with class_id and assignment_id for analytics
+    with get_db() as conn:
+        conn.execute(
+            """INSERT INTO leaderboard (quiz_id, display_name, score, total, percentage, created_at, class_id, assignment_id)
+               VALUES (?,?,?,?,?,?,?,?)""",
+            (quiz["id"], name, correct, total, pct, datetime.utcnow().isoformat(),
+             a["class_id"], a["id"]),
+        )
+        conn.commit()
+    return {
+        "assignment_id": a["id"],
+        "student_name": name,
+        "score": correct, "total": total, "percentage": pct,
+        "results": results,
+        "youtube_video_id": quiz.get("youtube_video_id"),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Analytics
+# ---------------------------------------------------------------------------
+@app.get("/api/assignments/{assignment_id}/analytics")
+def api_assignment_analytics(assignment_id: str):
+    """Per-question correct rates and per-student scores."""
+    a = load_assignment(assignment_id)
+    if not a:
+        raise HTTPException(status_code=404, detail="Assignment not found.")
+    quiz = load_quiz(a["quiz_id"])
+    if not quiz:
+        raise HTTPException(status_code=404, detail="Quiz not found.")
+    with get_db() as conn:
+        rows = conn.execute(
+            """SELECT display_name, score, total, percentage, created_at
+               FROM leaderboard WHERE assignment_id = ? ORDER BY percentage DESC""",
+            (assignment_id,),
+        ).fetchall()
+    submissions = [dict(r) for r in rows]
+
+    if not submissions:
+        return {
+            "quiz_title": quiz["title"],
+            "total_submissions": 0,
+            "average_pct": 0,
+            "submissions": [],
+            "questions": [
+                {
+                    "id": q["id"],
+                    "question": q["question"],
+                    "correct_answer": q["correct_answer"],
+                    "type": q["type"],
+                    "correct_rate": None,
+                }
+                for q in quiz["questions"]
+            ],
+        }
+
+    avg = sum(s["percentage"] for s in submissions) / len(submissions)
+    # We don't store individual answers, only aggregate scores. Per-question correct rate
+    # requires more data than we currently capture. We'll return aggregate stats and a
+    # placeholder for question-level (TODO improvement).
+    questions = [
+        {
+            "id": q["id"],
+            "question": q["question"],
+            "correct_answer": q["correct_answer"],
+            "type": q["type"],
+            "difficulty": q.get("difficulty"),
+        }
+        for q in quiz["questions"]
+    ]
+    return {
+        "quiz_title": quiz["title"],
+        "total_submissions": len(submissions),
+        "average_pct": round(avg, 1),
+        "submissions": submissions,
+        "questions": questions,
+    }
+
+
+@app.get("/api/assignments/{assignment_id}/export.csv")
+def api_export_assignment_csv(assignment_id: str):
+    """Export submissions as CSV."""
+    a = load_assignment(assignment_id)
+    if not a:
+        raise HTTPException(status_code=404, detail="Assignment not found.")
+    quiz = load_quiz(a["quiz_id"])
+    cls = load_class(a["class_id"])
+    with get_db() as conn:
+        rows = conn.execute(
+            """SELECT display_name, score, total, percentage, created_at
+               FROM leaderboard WHERE assignment_id = ? ORDER BY display_name""",
+            (assignment_id,),
+        ).fetchall()
+
+    import io as iolib, csv
+    buf = iolib.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["Class", "Quiz", "Student", "Score", "Total", "Percentage", "Submitted At"])
+    for r in rows:
+        w.writerow([
+            cls["name"] if cls else "",
+            quiz["title"] if quiz else "",
+            r["display_name"], r["score"], r["total"], r["percentage"], r["created_at"],
+        ])
+    csv_text = buf.getvalue()
+    filename = f"{(quiz['title'] if quiz else 'assignment').replace(' ', '_')}.csv"
+
+    from fastapi.responses import Response
+    return Response(
+        content=csv_text,
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.get("/api/classes/{class_id}/export.csv")
+def api_export_class_csv(class_id: str):
+    """Export ALL assignment submissions for a class as a single CSV (gradebook)."""
+    cls = load_class(class_id)
+    if not cls:
+        raise HTTPException(status_code=404, detail="Class not found.")
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT q.title as quiz_title, l.display_name, l.score, l.total, l.percentage, l.created_at, l.assignment_id
+            FROM leaderboard l
+            JOIN quizzes q ON q.id = l.quiz_id
+            WHERE l.class_id = ?
+            ORDER BY l.display_name, l.created_at
+        """, (class_id,)).fetchall()
+
+    import io as iolib, csv
+    buf = iolib.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["Class", "Quiz", "Student", "Score", "Total", "Percentage", "Submitted At"])
+    for r in rows:
+        w.writerow([
+            cls["name"], r["quiz_title"], r["display_name"],
+            r["score"], r["total"], r["percentage"], r["created_at"],
+        ])
+
+    from fastapi.responses import Response
+    return Response(
+        content=buf.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{cls["name"].replace(" ", "_")}_gradebook.csv"'},
+    )
+

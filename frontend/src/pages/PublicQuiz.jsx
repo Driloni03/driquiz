@@ -3,10 +3,12 @@ import { useParams, Link } from 'react-router-dom'
 import {
   Loader2, CheckCircle2, XCircle, RotateCcw, BookOpen, Video as Youtube,
   Clock, ArrowLeft, Trophy, Share2, Lightbulb, X, Sparkles, Medal,
+  GraduationCap, Send, Calendar,
 } from 'lucide-react'
 import {
   getPublicQuiz, submitToLeaderboard, getLeaderboard,
   formatTimestamp, youtubeLinkAt, streamEli5, fireConfetti,
+  listClasses, createAssignment,
 } from '../api'
 
 const DIFFICULTY_LABELS = { easy: 'Easy', medium: 'Medium', hard: 'Hard', mixed: 'Mixed' }
@@ -21,6 +23,7 @@ export default function PublicQuiz() {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
   const [showLeaderboard, setShowLeaderboard] = useState(false)
+  const [showPushModal, setShowPushModal] = useState(false)
   const [copied, setCopied] = useState(false)
 
   useEffect(() => { loadQuiz() }, [quizId])
@@ -186,10 +189,14 @@ export default function PublicQuiz() {
           <button className="btn btn-secondary btn-small" onClick={copyShareLink}>
             <Share2 size={14} /> {copied ? 'Copied!' : 'Share Quiz'}
           </button>
+          <button className="btn btn-secondary btn-small" onClick={() => setShowPushModal(true)}>
+            <GraduationCap size={14} /> Push to class
+          </button>
         </div>
       </div>
 
       {showLeaderboard && <LeaderboardModal quizId={quiz.id} onClose={() => setShowLeaderboard(false)} />}
+      {showPushModal && <PushToClassModal quizId={quiz.id} quizTitle={quiz.title} onClose={() => setShowPushModal(false)} />}
 
       {quiz.questions.map((q, idx) => (
         <div key={q.id} className="question-card">
@@ -389,3 +396,107 @@ function TimestampLink({ videoId, seconds }) {
     </a>
   )
 }
+
+/* ============================================================
+   Push to Class modal
+   ============================================================ */
+function PushToClassModal({ quizId, quizTitle, onClose }) {
+  const [classes, setClasses] = useState([])
+  const [classId, setClassId] = useState('')
+  const [dueDate, setDueDate] = useState('')
+  const [dueTime, setDueTime] = useState('23:59')
+  const [loading, setLoading] = useState(true)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const [success, setSuccess] = useState(false)
+
+  useEffect(() => {
+    listClasses()
+      .then(setClasses)
+      .catch(() => setError('Could not load classes.'))
+      .finally(() => setLoading(false))
+  }, [])
+
+  const submit = async () => {
+    if (!classId) {
+      setError('Pick a class.')
+      return
+    }
+    setError('')
+    setBusy(true)
+    try {
+      let due_at = null
+      if (dueDate) due_at = new Date(`${dueDate}T${dueTime}`).toISOString()
+      await createAssignment(classId, quizId, due_at)
+      setSuccess(true)
+      setTimeout(onClose, 1500)
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Could not assign.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal" onClick={e => e.stopPropagation()}>
+        <div className="modal-header">
+          <h3><GraduationCap size={18} /> Push to a class</h3>
+          <button className="chat-close" onClick={onClose}><X size={18} /></button>
+        </div>
+        <div className="modal-subtitle">"{quizTitle}"</div>
+        <div className="modal-body">
+          {success ? (
+            <div className="alert alert-success" style={{ textAlign: 'center' }}>
+              ✅ Assignment created! Students in the class can now take this quiz.
+            </div>
+          ) : (
+            <>
+              {error && <div className="alert alert-error">⚠️ {error}</div>}
+              {loading ? (
+                <div className="center-text"><Loader2 size={20} className="spinner" /></div>
+              ) : classes.length === 0 ? (
+                <div className="text-info center-text" style={{ padding: '1rem' }}>
+                  No classes yet. <Link to="/teacher" style={{ color: 'var(--accent-light)' }}>Create one in the teacher dashboard</Link>.
+                </div>
+              ) : (
+                <>
+                  <div className="field">
+                    <label className="label">Class</label>
+                    <select className="select" value={classId} onChange={e => setClassId(e.target.value)}>
+                      <option value="">— Select —</option>
+                      {classes.map(c => (
+                        <option key={c.id} value={c.id}>
+                          {c.name} ({c.student_count} student{c.student_count === 1 ? '' : 's'})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="row">
+                    <div className="field">
+                      <label className="label">Due date (optional)</label>
+                      <input className="input" type="date" value={dueDate} onChange={e => setDueDate(e.target.value)} disabled={busy} />
+                    </div>
+                    <div className="field">
+                      <label className="label">Due time</label>
+                      <input className="input" type="time" value={dueTime} onChange={e => setDueTime(e.target.value)} disabled={busy || !dueDate} />
+                    </div>
+                  </div>
+
+                  <div className="button-row">
+                    <button className="btn" onClick={submit} disabled={busy || !classId}>
+                      {busy ? <><Loader2 size={16} className="spinner" /> Assigning...</> : <><Send size={16} /> Assign to class</>}
+                    </button>
+                    <button className="btn btn-secondary" onClick={onClose} disabled={busy}>Cancel</button>
+                  </div>
+                </>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+

@@ -1,40 +1,47 @@
 import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
-import { Loader2, Sparkles, FileText, Video, Clock, Share2, Play } from 'lucide-react'
-import { listQuizzes } from '../api'
+import {
+  Loader2, Sparkles, FileText, Video, Clock, Share2, Play, Layers, ScrollText,
+} from 'lucide-react'
+import { listQuizzes, listFlashcardSets, listNotes } from '../api'
 
 export default function History() {
+  const [tab, setTab] = useState('quizzes') // 'quizzes' | 'flashcards' | 'notes'
   const [quizzes, setQuizzes] = useState([])
+  const [flashcards, setFlashcards] = useState([])
+  const [notes, setNotes] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [copiedId, setCopiedId] = useState(null)
 
-  useEffect(() => {
-    loadQuizzes()
-  }, [])
+  useEffect(() => { loadAll() }, [])
 
-  const loadQuizzes = async () => {
+  const loadAll = async () => {
     setLoading(true)
     setError('')
     try {
-      const data = await listQuizzes()
-      setQuizzes(data)
+      const [q, f, n] = await Promise.all([
+        listQuizzes().catch(() => []),
+        listFlashcardSets().catch(() => []),
+        listNotes().catch(() => []),
+      ])
+      setQuizzes(q)
+      setFlashcards(f)
+      setNotes(n)
     } catch (err) {
-      setError('Could not load quiz history.')
+      setError('Could not load history.')
     } finally {
       setLoading(false)
     }
   }
 
-  const copyShareLink = async (quizId) => {
-    const url = `${window.location.origin}/q/${quizId}`
+  const copyShareLink = async (path, id) => {
+    const url = `${window.location.origin}${path}`
     try {
       await navigator.clipboard.writeText(url)
-      setCopiedId(quizId)
+      setCopiedId(id)
       setTimeout(() => setCopiedId(null), 2000)
-    } catch (_) {
-      prompt('Copy this share link:', url)
-    }
+    } catch (_) { prompt('Copy:', url) }
   }
 
   const formatDate = (iso) => {
@@ -52,34 +59,40 @@ export default function History() {
     return <Sparkles size={14} />
   }
 
+  const total = quizzes.length + flashcards.length + notes.length
+
   return (
     <div className="container">
       <div className="header">
-        <h1>Your quizzes</h1>
-        <p>{quizzes.length} {quizzes.length === 1 ? 'quiz' : 'quizzes'} saved · Click to retake or share</p>
+        <h1>Your study materials</h1>
+        <p>{total} item{total === 1 ? '' : 's'} saved</p>
       </div>
 
-      {loading && (
-        <div className="card center-text">
-          <Loader2 size={24} className="spinner" />
-          <p>Loading...</p>
-        </div>
-      )}
+      <div className="tabs" style={{ marginBottom: '1.25rem' }}>
+        <button className={`tab ${tab === 'quizzes' ? 'active' : ''}`} onClick={() => setTab('quizzes')}>
+          <Sparkles size={14} /> Quizzes ({quizzes.length})
+        </button>
+        <button className={`tab ${tab === 'flashcards' ? 'active' : ''}`} onClick={() => setTab('flashcards')}>
+          <Layers size={14} /> Flashcards ({flashcards.length})
+        </button>
+        <button className={`tab ${tab === 'notes' ? 'active' : ''}`} onClick={() => setTab('notes')}>
+          <ScrollText size={14} /> Notes ({notes.length})
+        </button>
+      </div>
 
       {error && <div className="alert alert-error">⚠️ {error}</div>}
 
-      {!loading && quizzes.length === 0 && (
+      {loading && (
         <div className="card center-text">
-          <p style={{ marginBottom: '1rem' }}>No quizzes yet.</p>
-          <Link to="/app" className="btn">
-            <Sparkles size={16} /> Create your first quiz
-          </Link>
+          <Loader2 size={24} className="spinner" /><p>Loading...</p>
         </div>
       )}
 
-      {!loading && quizzes.length > 0 && (
-        <div className="quiz-list">
-          {quizzes.map((q) => (
+      {!loading && tab === 'quizzes' && (
+        <ItemList
+          items={quizzes}
+          emptyText="No quizzes yet."
+          renderRow={(q) => (
             <div key={q.id} className="quiz-row">
               <div className="quiz-row-main">
                 <div className="quiz-row-icon">{sourceIcon(q.source_type)}</div>
@@ -91,22 +104,73 @@ export default function History() {
                 </div>
               </div>
               <div className="quiz-row-actions">
-                <button
-                  className="btn btn-secondary btn-small"
-                  onClick={() => copyShareLink(q.id)}
-                  title="Copy public share link"
-                >
-                  <Share2 size={14} />
-                  {copiedId === q.id ? 'Copied!' : 'Share'}
+                <button className="btn btn-secondary btn-small" onClick={() => copyShareLink(`/q/${q.id}`, q.id)}>
+                  <Share2 size={14} /> {copiedId === q.id ? 'Copied!' : 'Share'}
                 </button>
-                <Link to={`/q/${q.id}`} className="btn btn-small">
-                  <Play size={14} /> Take
-                </Link>
+                <Link to={`/q/${q.id}`} className="btn btn-small"><Play size={14} /> Take</Link>
               </div>
             </div>
-          ))}
-        </div>
+          )}
+        />
+      )}
+
+      {!loading && tab === 'flashcards' && (
+        <ItemList
+          items={flashcards}
+          emptyText="No flashcard sets yet."
+          renderRow={(f) => (
+            <div key={f.id} className="quiz-row">
+              <div className="quiz-row-main">
+                <div className="quiz-row-icon"><Layers size={14} /></div>
+                <div className="quiz-row-info">
+                  <div className="quiz-row-title">{f.title}</div>
+                  <div className="quiz-row-meta">
+                    <Clock size={11} /> {formatDate(f.created_at)} · {f.num_cards} cards
+                  </div>
+                </div>
+              </div>
+              <div className="quiz-row-actions">
+                <Link to={`/flashcards/${f.id}`} className="btn btn-small"><Play size={14} /> Study</Link>
+              </div>
+            </div>
+          )}
+        />
+      )}
+
+      {!loading && tab === 'notes' && (
+        <ItemList
+          items={notes}
+          emptyText="No notes yet."
+          renderRow={(n) => (
+            <div key={n.id} className="quiz-row">
+              <div className="quiz-row-main">
+                <div className="quiz-row-icon"><ScrollText size={14} /></div>
+                <div className="quiz-row-info">
+                  <div className="quiz-row-title">{n.title}</div>
+                  <div className="quiz-row-meta">
+                    <Clock size={11} /> {formatDate(n.created_at)} · {n.format === 'guide' ? 'study guide' : 'quick summary'}
+                  </div>
+                </div>
+              </div>
+              <div className="quiz-row-actions">
+                <Link to={`/notes/${n.id}`} className="btn btn-small">Open</Link>
+              </div>
+            </div>
+          )}
+        />
       )}
     </div>
   )
+}
+
+function ItemList({ items, emptyText, renderRow }) {
+  if (items.length === 0) {
+    return (
+      <div className="card center-text">
+        <p style={{ marginBottom: '1rem' }}>{emptyText}</p>
+        <Link to="/app" className="btn"><Sparkles size={16} /> Create something</Link>
+      </div>
+    )
+  }
+  return <div className="quiz-list">{items.map(renderRow)}</div>
 }
