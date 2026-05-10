@@ -2,11 +2,36 @@ import { useState, useEffect } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import {
   Users, FileText, Plus, Trash2, BarChart3, Download, Copy, Check,
-  Loader2, ArrowLeft, Clock, GraduationCap, X, Calendar,
+  Loader2, ArrowLeft, Clock, GraduationCap, X, Calendar, Megaphone, Palette,
+  Settings, BookOpen, Brain, Trophy as TrophyIcon, Star, Atom, Beaker, Code,
 } from 'lucide-react'
 import {
   getClass, deleteAssignment, createAssignment, listQuizzes, exportClassCsvUrl,
+  listAnnouncements, createAnnouncement, deleteAnnouncement, updateClass,
 } from '../../api'
+
+const STORAGE_TEACHER = 'driquiz_teacher_name'
+
+const CLASS_COLORS = [
+  '#7c3aed', '#3b82f6', '#10b981', '#f59e0b',
+  '#ef4444', '#ec4899', '#06b6d4', '#84cc16',
+]
+
+const CLASS_ICONS = [
+  { id: 'graduation', label: 'Graduation', Component: GraduationCap },
+  { id: 'book', label: 'Book', Component: BookOpen },
+  { id: 'brain', label: 'Brain', Component: Brain },
+  { id: 'trophy', label: 'Trophy', Component: TrophyIcon },
+  { id: 'star', label: 'Star', Component: Star },
+  { id: 'atom', label: 'Atom', Component: Atom },
+  { id: 'beaker', label: 'Beaker', Component: Beaker },
+  { id: 'code', label: 'Code', Component: Code },
+]
+
+export const getIconComponent = (id) => {
+  const found = CLASS_ICONS.find(i => i.id === id)
+  return found ? found.Component : GraduationCap
+}
 
 export default function ClassDetail() {
   const { classId } = useParams()
@@ -14,19 +39,56 @@ export default function ClassDetail() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [showAddAssignment, setShowAddAssignment] = useState(false)
+  const [showSettings, setShowSettings] = useState(false)
   const [copiedCode, setCopiedCode] = useState(false)
+  const [announcements, setAnnouncements] = useState([])
 
   useEffect(() => { load() }, [classId])
 
   const load = async () => {
     setLoading(true)
     try {
-      const result = await getClass(classId)
+      const [result, anns] = await Promise.all([
+        getClass(classId),
+        listAnnouncements(classId).catch(() => []),
+      ])
       setData(result)
+      setAnnouncements(anns)
     } catch (err) {
       setError(err.response?.data?.detail || 'Could not load class.')
     } finally {
       setLoading(false)
+    }
+  }
+
+  const postAnnouncement = async (msg) => {
+    const teacherName = data?.class?.teacher_name || localStorage.getItem(STORAGE_TEACHER) || 'Teacher'
+    try {
+      const a = await createAnnouncement(classId, teacherName, msg)
+      setAnnouncements([a, ...announcements])
+    } catch (err) {
+      alert('Could not post announcement.')
+    }
+  }
+
+  const removeAnnouncement = async (id) => {
+    if (!confirm('Delete this announcement?')) return
+    try {
+      await deleteAnnouncement(id)
+      setAnnouncements(prev => prev.filter(a => a.id !== id))
+    } catch (_) { alert('Could not delete.') }
+  }
+
+  const handleSaveSettings = async (updates) => {
+    try {
+      await updateClass(classId, updates)
+      setData(prev => ({
+        ...prev,
+        class: { ...prev.class, ...updates },
+      }))
+      setShowSettings(false)
+    } catch (err) {
+      alert('Could not save: ' + (err.response?.data?.detail || err.message))
     }
   }
 
@@ -90,10 +152,35 @@ export default function ClassDetail() {
     <div className="container">
       <Link to="/teacher" className="back-link"><ArrowLeft size={14} /> Dashboard</Link>
 
-      <div className="header">
-        <h1>{cls.name}</h1>
-        <p>Teacher: {cls.teacher_name} · Created {formatDate(cls.created_at)}</p>
+      <div className="class-header" style={{ borderColor: cls.color || '#7c3aed' }}>
+        <div className="class-header-icon" style={{ background: `linear-gradient(135deg, ${cls.color || '#7c3aed'}, ${cls.color || '#7c3aed'}dd)` }}>
+          {(() => {
+            const Icon = getIconComponent(cls.icon)
+            return <Icon size={28} />
+          })()}
+        </div>
+        <div className="class-header-info">
+          <h1>{cls.name}</h1>
+          <p>Teacher: {cls.teacher_name} · Created {formatDate(cls.created_at)}</p>
+        </div>
+        <button className="btn btn-secondary btn-small" onClick={() => setShowSettings(true)} title="Class settings">
+          <Settings size={14} />
+        </button>
       </div>
+
+      {showSettings && (
+        <ClassSettingsCard
+          cls={cls}
+          onSave={handleSaveSettings}
+          onClose={() => setShowSettings(false)}
+        />
+      )}
+
+      <AnnouncementsCard
+        announcements={announcements}
+        onPost={postAnnouncement}
+        onDelete={removeAnnouncement}
+      />
 
       <div className="card">
         <h2><GraduationCap size={20} /> Class code</h2>
@@ -275,3 +362,147 @@ function AddAssignmentForm({ classId, onClose, onAdded }) {
     </div>
   )
 }
+
+
+/* ============================================================
+   Announcements
+   ============================================================ */
+function AnnouncementsCard({ announcements, onPost, onDelete }) {
+  const [text, setText] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  const submit = async () => {
+    if (!text.trim()) return
+    setBusy(true)
+    try {
+      await onPost(text.trim())
+      setText('')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const formatRelative = (iso) => {
+    try {
+      const d = new Date(iso)
+      const now = new Date()
+      const diff = Math.floor((now - d) / 1000)
+      if (diff < 60) return 'just now'
+      if (diff < 3600) return `${Math.floor(diff / 60)} min ago`
+      if (diff < 86400) return `${Math.floor(diff / 3600)} h ago`
+      return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+    } catch (_) { return iso }
+  }
+
+  return (
+    <div className="card">
+      <h2><Megaphone size={20} /> Announcements ({announcements.length})</h2>
+      <div className="announcement-form">
+        <textarea
+          className="textarea"
+          style={{ minHeight: 70 }}
+          placeholder="Post an announcement to the class..."
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          maxLength={2000}
+          disabled={busy}
+        />
+        <button className="btn" onClick={submit} disabled={busy || !text.trim()}>
+          {busy ? <Loader2 size={16} className="spinner" /> : <><Megaphone size={16} /> Post</>}
+        </button>
+      </div>
+      {announcements.length === 0 ? (
+        <p className="text-info center-text" style={{ padding: '1rem' }}>
+          No announcements yet.
+        </p>
+      ) : (
+        <div className="announcement-list">
+          {announcements.map(a => (
+            <div key={a.id} className="announcement-row">
+              <div className="announcement-content">
+                <div className="announcement-meta">
+                  <strong>{a.author_name}</strong> · {formatRelative(a.created_at)}
+                </div>
+                <div className="announcement-message">{a.message}</div>
+              </div>
+              <button className="chat-close" onClick={() => onDelete(a.id)} title="Delete">
+                <X size={14} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/* ============================================================
+   Class settings (color/icon)
+   ============================================================ */
+function ClassSettingsCard({ cls, onSave, onClose }) {
+  const [name, setName] = useState(cls.name)
+  const [color, setColor] = useState(cls.color || '#7c3aed')
+  const [icon, setIcon] = useState(cls.icon || 'graduation')
+  const [saving, setSaving] = useState(false)
+
+  const submit = async () => {
+    setSaving(true)
+    await onSave({ name: name.trim(), color, icon })
+    setSaving(false)
+  }
+
+  return (
+    <div className="card">
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+        <h2 style={{ margin: 0 }}><Palette size={20} /> Class settings</h2>
+        <button className="chat-close" onClick={onClose}><X size={16} /></button>
+      </div>
+
+      <div className="field">
+        <label className="label">Name</label>
+        <input className="input" value={name} onChange={(e) => setName(e.target.value)} maxLength={100} />
+      </div>
+
+      <div className="field">
+        <label className="label">Color</label>
+        <div className="color-row">
+          {CLASS_COLORS.map(c => (
+            <button
+              key={c}
+              type="button"
+              className={`color-swatch ${color === c ? 'active' : ''}`}
+              style={{ background: c }}
+              onClick={() => setColor(c)}
+              aria-label={c}
+            />
+          ))}
+        </div>
+      </div>
+
+      <div className="field">
+        <label className="label">Icon</label>
+        <div className="icon-row">
+          {CLASS_ICONS.map(({ id, label, Component }) => (
+            <button
+              key={id}
+              type="button"
+              className={`icon-chip ${icon === id ? 'active' : ''}`}
+              onClick={() => setIcon(id)}
+              title={label}
+            >
+              <Component size={18} />
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="button-row">
+        <button className="btn" onClick={submit} disabled={saving || !name.trim()}>
+          {saving ? <><Loader2 size={16} className="spinner" /> Saving...</> : <><Check size={16} /> Save</>}
+        </button>
+        <button className="btn btn-secondary" onClick={onClose} disabled={saving}>Cancel</button>
+      </div>
+    </div>
+  )
+}
+

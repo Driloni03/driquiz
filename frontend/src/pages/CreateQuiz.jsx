@@ -62,6 +62,7 @@ export default function CreateQuiz() {
   const [numQuestions, setNumQuestions] = useState(5)
   const [difficulty, setDifficulty] = useState('mixed')
   const [questionTypes, setQuestionTypes] = useState(['multiple_choice'])
+  const [timeLimitMinutes, setTimeLimitMinutes] = useState(0)  // 0 = no limit
 
   // App state
   const [loading, setLoading] = useState(false)
@@ -163,6 +164,7 @@ export default function CreateQuiz() {
         source_type: aggregateSourceType(),
         youtube_video_id: aggregateYoutubeVideoId(),
         focus_concepts: focusConceptNames(),
+        time_limit_seconds: timeLimitMinutes > 0 ? timeLimitMinutes * 60 : null,
       })
       persistAndRedirect(`/q/${data.id}`)
     } catch (err) {
@@ -274,6 +276,8 @@ export default function CreateQuiz() {
             setDifficulty={setDifficulty}
             questionTypes={questionTypes}
             setQuestionTypes={setQuestionTypes}
+            timeLimitMinutes={timeLimitMinutes}
+            setTimeLimitMinutes={setTimeLimitMinutes}
             handleGenerate={handleGenerateQuiz}
             back={() => setStep(concepts.length > 0 ? 'concepts' : 'input')}
             loading={loading}
@@ -700,7 +704,8 @@ function ConceptsStep({ concepts, selectedConcepts, toggleConcept, goToSettings,
    ============================================================ */
 function SettingsStep({
   numQuestions, setNumQuestions, difficulty, setDifficulty,
-  questionTypes, setQuestionTypes, handleGenerate, back, loading, loadingMsg,
+  questionTypes, setQuestionTypes, timeLimitMinutes, setTimeLimitMinutes,
+  handleGenerate, back, loading, loadingMsg,
   sourceCount, conceptCount,
 }) {
   const toggleType = (type) => {
@@ -745,6 +750,24 @@ function SettingsStep({
               </label>
             )
           })}
+        </div>
+      </div>
+
+      <div className="field">
+        <label className="label">
+          Time limit: {timeLimitMinutes > 0 ? `${timeLimitMinutes} min` : 'No limit'}
+        </label>
+        <div className="time-limit-row">
+          {[0, 5, 10, 15, 30, 60].map(m => (
+            <button
+              key={m}
+              type="button"
+              className={`time-chip ${timeLimitMinutes === m ? 'active' : ''}`}
+              onClick={() => setTimeLimitMinutes(m)}
+            >
+              {m === 0 ? 'No limit' : `${m} min`}
+            </button>
+          ))}
         </div>
       </div>
 

@@ -3,6 +3,98 @@ import axios from 'axios'
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 const api = axios.create({ baseURL: API_BASE, timeout: 120000 })
 
+// Inject Authorization header from localStorage if present
+api.interceptors.request.use((config) => {
+  try {
+    const token = localStorage.getItem('driquiz_token')
+    if (token) {
+      config.headers.Authorization = `Bearer ${token}`
+    }
+  } catch (_) {}
+  return config
+})
+
+// On 401, clear token (let UI redirect to /signin)
+api.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (error.response?.status === 401) {
+      try {
+        localStorage.removeItem('driquiz_token')
+        localStorage.removeItem('driquiz_teacher')
+      } catch (_) {}
+    }
+    return Promise.reject(error)
+  }
+)
+
+// Auth helpers (these don't import React; the auth context will use them)
+export const saveAuth = (token, teacher) => {
+  localStorage.setItem('driquiz_token', token)
+  localStorage.setItem('driquiz_teacher', JSON.stringify(teacher))
+}
+export const clearAuth = () => {
+  localStorage.removeItem('driquiz_token')
+  localStorage.removeItem('driquiz_teacher')
+}
+export const getAuthToken = () => localStorage.getItem('driquiz_token')
+export const getAuthTeacher = () => {
+  try { return JSON.parse(localStorage.getItem('driquiz_teacher') || 'null') }
+  catch (_) { return null }
+}
+
+// Auth API
+export const apiSignUp = async (email, password, name) => {
+  const { data } = await api.post('/api/auth/signup', { email, password, name })
+  saveAuth(data.token, data.teacher)
+  return data
+}
+export const apiSignIn = async (email, password) => {
+  const { data } = await api.post('/api/auth/signin', { email, password })
+  saveAuth(data.token, data.teacher)
+  return data
+}
+export const apiSignOut = async () => {
+  try { await api.post('/api/auth/signout') } catch (_) {}
+  clearAuth()
+}
+export const apiMe = async () => {
+  const { data } = await api.get('/api/auth/me')
+  return data.teacher
+}
+
+// Live mode API
+export const createLiveSession = async (quiz_id) => {
+  const { data } = await api.post('/api/live/create', { quiz_id })
+  return data
+}
+export const joinLiveSession = async (code, player_name) => {
+  const { data } = await api.post('/api/live/join', { code, player_name })
+  return data
+}
+export const getLiveState = async (sessionId, playerId = null) => {
+  const params = playerId != null ? { player_id: playerId } : {}
+  const { data } = await api.get(`/api/live/${sessionId}/state`, { params })
+  return data
+}
+export const startLiveSession = async (sessionId) => {
+  const { data } = await api.post(`/api/live/${sessionId}/start`)
+  return data
+}
+export const revealLiveQuestion = async (sessionId) => {
+  const { data } = await api.post(`/api/live/${sessionId}/reveal`)
+  return data
+}
+export const nextLiveQuestion = async (sessionId) => {
+  const { data } = await api.post(`/api/live/${sessionId}/next`)
+  return data
+}
+export const submitLiveAnswer = async (session_id, player_id, question_index, answer) => {
+  const { data } = await api.post('/api/live/answer', { session_id, player_id, question_index, answer })
+  return data
+}
+
+
 export const uploadPdf = async (file) => {
   const formData = new FormData()
   formData.append('file', file)
@@ -209,6 +301,37 @@ export const exportAssignmentCsvUrl = (assignmentId) =>
 
 export const exportClassCsvUrl = (classId) =>
   `${API_BASE}/api/classes/${classId}/export.csv`
+
+
+// =================== ANNOUNCEMENTS ===================
+export const createAnnouncement = async (class_id, author_name, message) => {
+  const { data } = await api.post('/api/announcements', { class_id, author_name, message })
+  return data
+}
+
+export const listAnnouncements = async (classId) => {
+  const { data } = await api.get(`/api/classes/${classId}/announcements`)
+  return data.announcements
+}
+
+export const deleteAnnouncement = async (announcementId) => {
+  const { data } = await api.delete(`/api/announcements/${announcementId}`)
+  return data
+}
+
+// =================== CLASS UPDATE ===================
+export const updateClass = async (classId, fields) => {
+  const { data } = await api.patch(`/api/classes/${classId}`, fields)
+  return data
+}
+
+// =================== AI SHORT-ANSWER GRADING ===================
+export const gradeShortAnswer = async (question, correct_answer, student_answer) => {
+  const { data } = await api.post('/api/grade-short-answer', {
+    question, correct_answer, student_answer,
+  })
+  return data
+}
 
 export const formatTimestamp = (seconds) => {
   if (seconds == null || isNaN(seconds)) return ''

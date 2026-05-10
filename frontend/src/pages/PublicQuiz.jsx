@@ -3,12 +3,12 @@ import { useParams, Link } from 'react-router-dom'
 import {
   Loader2, CheckCircle2, XCircle, RotateCcw, BookOpen, Video as Youtube,
   Clock, ArrowLeft, Trophy, Share2, Lightbulb, X, Sparkles, Medal,
-  GraduationCap, Send, Calendar,
+  GraduationCap, Send, Calendar, Timer, AlertTriangle,
 } from 'lucide-react'
 import {
   getPublicQuiz, submitToLeaderboard, getLeaderboard,
   formatTimestamp, youtubeLinkAt, streamEli5, fireConfetti,
-  listClasses, createAssignment,
+  listClasses, createAssignment, gradeShortAnswer,
 } from '../api'
 
 const DIFFICULTY_LABELS = { easy: 'Easy', medium: 'Medium', hard: 'Hard', mixed: 'Mixed' }
@@ -27,6 +27,29 @@ export default function PublicQuiz() {
   const [copied, setCopied] = useState(false)
 
   useEffect(() => { loadQuiz() }, [quizId])
+
+  // Countdown timer (only when quiz has a time limit and not yet submitted)
+  const [secondsLeft, setSecondsLeft] = useState(null)
+  const [timerStarted, setTimerStarted] = useState(false)
+
+  useEffect(() => {
+    if (!quiz || results || !quiz.time_limit_seconds) return
+    if (!timerStarted) {
+      setSecondsLeft(quiz.time_limit_seconds)
+      setTimerStarted(true)
+    }
+  }, [quiz, results, timerStarted])
+
+  useEffect(() => {
+    if (secondsLeft == null || results) return
+    if (secondsLeft <= 0) {
+      // Auto-submit when time runs out
+      handleSubmit()
+      return
+    }
+    const t = setTimeout(() => setSecondsLeft(s => s - 1), 1000)
+    return () => clearTimeout(t)
+  }, [secondsLeft, results])
 
   const loadQuiz = async () => {
     setLoading(true)
@@ -198,6 +221,10 @@ export default function PublicQuiz() {
       {showLeaderboard && <LeaderboardModal quizId={quiz.id} onClose={() => setShowLeaderboard(false)} />}
       {showPushModal && <PushToClassModal quizId={quiz.id} quizTitle={quiz.title} onClose={() => setShowPushModal(false)} />}
 
+      {quiz.time_limit_seconds && secondsLeft != null && (
+        <TimerBanner secondsLeft={secondsLeft} totalSeconds={quiz.time_limit_seconds} />
+      )}
+
       {quiz.questions.map((q, idx) => (
         <div key={q.id} className="question-card">
           <div className="question-header">
@@ -306,6 +333,11 @@ function ResultCard({ result: r, idx, quiz, videoId }) {
         <strong>Explanation:</strong> {r.explanation}
         {r.source_chunk && <div className="source-quote">"{r.source_chunk}"</div>}
       </div>
+
+      {/* AI short-answer feedback */}
+      {q && !q.options && q.type === 'short_answer' && r.user_answer && r.user_answer.trim() && (
+        <ShortAnswerAIFeedback question={r.question} correctAnswer={r.correct_answer} studentAnswer={r.user_answer} />
+      )}
 
       {!eli5 && !eli5Loading && (
         <button className="btn-ghost-small" onClick={askEli5}>
@@ -496,6 +528,87 @@ function PushToClassModal({ quizId, quizTitle, onClose }) {
           )}
         </div>
       </div>
+    </div>
+  )
+}
+
+/* ============================================================
+   Countdown Timer Banner
+   ============================================================ */
+function TimerBanner({ secondsLeft, totalSeconds }) {
+  const m = Math.floor(secondsLeft / 60)
+  const s = secondsLeft % 60
+  const pct = (secondsLeft / totalSeconds) * 100
+  const urgent = secondsLeft <= 30
+  const warning = secondsLeft <= 60 && !urgent
+
+  return (
+    <div className={`timer-banner ${urgent ? 'urgent' : warning ? 'warning' : ''}`}>
+      <div className="timer-content">
+        {urgent ? <AlertTriangle size={18} /> : <Timer size={18} />}
+        <span className="timer-time">{m}:{String(s).padStart(2, '0')}</span>
+        <span className="timer-label">remaining</span>
+      </div>
+      <div className="timer-bar">
+        <div className="timer-bar-fill" style={{ width: `${pct}%` }} />
+      </div>
+    </div>
+  )
+}
+
+/* ============================================================
+   AI Short-Answer Feedback
+   ============================================================ */
+function ShortAnswerAIFeedback({ question, correctAnswer, studentAnswer }) {
+  const [open, setOpen] = useState(false)
+  const [result, setResult] = useState(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+
+  const ask = async () => {
+    if (loading) return
+    setLoading(true)
+    setError('')
+    try {
+      const data = await gradeShortAnswer(question, correctAnswer, studentAnswer)
+      setResult(data)
+      setOpen(true)
+    } catch (err) {
+      setError(err.response?.data?.detail || 'AI grading failed.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  if (!open && !loading) {
+    return (
+      <button className="btn-ghost-small" onClick={ask} style={{ marginRight: '0.5rem' }}>
+        <Sparkles size={13} /> Get AI feedback
+      </button>
+    )
+  }
+
+  if (loading) {
+    return (
+      <div className="ai-feedback loading">
+        <Loader2 size={13} className="spinner" /> Grading your answer...
+      </div>
+    )
+  }
+
+  if (error) {
+    return <div className="ai-feedback error">{error}</div>
+  }
+
+  const scoreColor = result.score >= 1 ? 'success' : result.score >= 0.5 ? 'partial' : 'wrong'
+  const scoreLabel = result.score >= 1 ? 'Full credit' : result.score >= 0.5 ? 'Partial credit' : 'No credit'
+
+  return (
+    <div className={`ai-feedback ${scoreColor}`}>
+      <div className="ai-feedback-header">
+        <Sparkles size={13} /> AI Feedback · <strong>{scoreLabel}</strong> ({result.score.toFixed(1)})
+      </div>
+      <div className="ai-feedback-text">{result.feedback}</div>
     </div>
   )
 }

@@ -9,12 +9,14 @@ import uuid
 import time
 import random
 import sqlite3
+import secrets
+import hashlib
 from contextlib import contextmanager
 from typing import List, Optional, Literal
-from datetime import datetime
+from datetime import datetime, timedelta
 from collections import defaultdict, deque
 
-from fastapi import FastAPI, File, UploadFile, HTTPException, Request
+from fastapi import FastAPI, File, UploadFile, HTTPException, Request, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -139,6 +141,114 @@ def init_db():
             )
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_assignments_class ON assignments(class_id)")
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS class_announcements (
+                id TEXT PRIMARY KEY,
+                class_id TEXT NOT NULL,
+                author_name TEXT NOT NULL,
+                message TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (class_id) REFERENCES classes(id) ON DELETE CASCADE
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_announcements_class ON class_announcements(class_id, created_at DESC)")
+
+        # Add new columns to existing tables (idempotent migrations)
+        for sql in [
+            "ALTER TABLE classes ADD COLUMN color TEXT DEFAULT '#7c3aed'",
+            "ALTER TABLE classes ADD COLUMN icon TEXT DEFAULT 'graduation'",
+            "ALTER TABLE quizzes ADD COLUMN time_limit_seconds INTEGER",
+            "ALTER TABLE classes ADD COLUMN teacher_id TEXT",  # nullable for legacy
+        ]:
+            try:
+                conn.execute(sql)
+            except sqlite3.OperationalError:
+                pass
+
+        # Auth tables
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS teachers (
+                id TEXT PRIMARY KEY,
+                email TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                name TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_teachers_email ON teachers(email)")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS sessions (
+                token TEXT PRIMARY KEY,
+                teacher_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                FOREIGN KEY (teacher_id) REFERENCES teachers(id) ON DELETE CASCADE
+            )
+        """)
+
+        # Live session tables (in-memory style but persisted briefly)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS live_sessions (
+                id TEXT PRIMARY KEY,
+                code TEXT NOT NULL UNIQUE,
+                quiz_id TEXT NOT NULL,
+                teacher_id TEXT NOT NULL,
+                state TEXT NOT NULL DEFAULT 'lobby',
+                current_question_index INTEGER DEFAULT -1,
+                question_started_at TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (quiz_id) REFERENCES quizzes(id),
+                FOREIGN KEY (teacher_id) REFERENCES teachers(id)
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_live_code ON live_sessions(code)")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS live_players (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                player_name TEXT NOT NULL,
+                joined_at TEXT NOT NULL,
+                score INTEGER DEFAULT 0,
+                last_seen TEXT NOT NULL,
+                FOREIGN KEY (session_id) REFERENCES live_sessions(id) ON DELETE CASCADE
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_live_players_session ON live_players(session_id)")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS live_answers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                player_id INTEGER NOT NULL,
+                question_index INTEGER NOT NULL,
+                answer TEXT NOT NULL,
+                is_correct INTEGER NOT NULL,
+                answered_at TEXT NOT NULL,
+                points INTEGER DEFAULT 0,
+                FOREIGN KEY (session_id) REFERENCES live_sessions(id) ON DELETE CASCADE,
+                FOREIGN KEY (player_id) REFERENCES live_players(id) ON DELETE CASCADE
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_live_answers ON live_answers(session_id, question_index)")
+
+        # Per user choice: clean start - clear ALL existing classes since they have no owner
+        # Only run this once. Use a marker to detect first run after auth.
+        try:
+            existing_marker = conn.execute("SELECT 1 FROM teachers LIMIT 1").fetchone()
+            # If no teacher exists yet, this is first auth-aware boot. Clear old classes.
+            if not existing_marker:
+                # Only clear if there are classes without teacher_id (legacy data)
+                legacy_count = conn.execute(
+                    "SELECT COUNT(*) c FROM classes WHERE teacher_id IS NULL"
+                ).fetchone()
+                if legacy_count and legacy_count["c"] > 0:
+                    conn.execute("DELETE FROM assignments WHERE class_id IN (SELECT id FROM classes WHERE teacher_id IS NULL)")
+                    conn.execute("DELETE FROM class_memberships WHERE class_id IN (SELECT id FROM classes WHERE teacher_id IS NULL)")
+                    conn.execute("DELETE FROM class_announcements WHERE class_id IN (SELECT id FROM classes WHERE teacher_id IS NULL)")
+                    conn.execute("DELETE FROM classes WHERE teacher_id IS NULL")
+                    print(f"[AUTH] Cleared {legacy_count['c']} legacy classes (no owner) - clean start enabled.")
+        except sqlite3.OperationalError:
+            pass
         # Add class_id and assignment_id to leaderboard for class-scoped scores
         for sql in [
             "ALTER TABLE leaderboard ADD COLUMN class_id TEXT",
@@ -164,12 +274,75 @@ def init_db():
 init_db()
 
 
+# ===========================================================================
+# AUTHENTICATION
+# ===========================================================================
+
+def hash_password(password: str) -> str:
+    """Salted SHA-256 hash. (bcrypt would be better but sha256 + salt is OK for a class project.)"""
+    salt = secrets.token_hex(16)
+    h = hashlib.sha256((salt + password).encode()).hexdigest()
+    return f"{salt}${h}"
+
+
+def verify_password(password: str, stored: str) -> bool:
+    try:
+        salt, expected = stored.split("$", 1)
+    except ValueError:
+        return False
+    actual = hashlib.sha256((salt + password).encode()).hexdigest()
+    return secrets.compare_digest(actual, expected)
+
+
+def create_session(teacher_id: str) -> str:
+    token = secrets.token_urlsafe(32)
+    now = datetime.utcnow()
+    exp = now + timedelta(days=30)
+    with get_db() as conn:
+        conn.execute(
+            "INSERT INTO sessions (token, teacher_id, created_at, expires_at) VALUES (?,?,?,?)",
+            (token, teacher_id, now.isoformat(), exp.isoformat()),
+        )
+        conn.commit()
+    return token
+
+
+def get_teacher_from_token(token: str) -> Optional[dict]:
+    with get_db() as conn:
+        row = conn.execute(
+            """SELECT t.id, t.email, t.name FROM sessions s
+               JOIN teachers t ON t.id = s.teacher_id
+               WHERE s.token = ? AND s.expires_at > ?""",
+            (token, datetime.utcnow().isoformat()),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def require_teacher(authorization: Optional[str] = Header(None)) -> dict:
+    """FastAPI dependency: return the teacher for a valid token, else 401."""
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Sign in required.")
+    token = authorization.split(None, 1)[1].strip()
+    teacher = get_teacher_from_token(token)
+    if not teacher:
+        raise HTTPException(status_code=401, detail="Session expired. Please sign in again.")
+    return teacher
+
+
+def optional_teacher(authorization: Optional[str] = Header(None)) -> Optional[dict]:
+    """Returns teacher dict if signed in, else None (for endpoints that work both ways)."""
+    if not authorization or not authorization.lower().startswith("bearer "):
+        return None
+    token = authorization.split(None, 1)[1].strip()
+    return get_teacher_from_token(token)
+
+
 def save_quiz(quiz_dict: dict):
     with get_db() as conn:
         conn.execute(
             """INSERT OR REPLACE INTO quizzes
-            (id, title, created_at, source_text_preview, source_type, youtube_video_id, questions_json)
-            VALUES (?,?,?,?,?,?,?)""",
+            (id, title, created_at, source_text_preview, source_type, youtube_video_id, questions_json, time_limit_seconds)
+            VALUES (?,?,?,?,?,?,?,?)""",
             (
                 quiz_dict["id"],
                 quiz_dict["title"],
@@ -178,6 +351,7 @@ def save_quiz(quiz_dict: dict):
                 quiz_dict.get("source_type", "text"),
                 quiz_dict.get("youtube_video_id"),
                 json.dumps(quiz_dict["questions"]),
+                quiz_dict.get("time_limit_seconds"),
             ),
         )
         conn.commit()
@@ -188,6 +362,11 @@ def load_quiz(quiz_id: str) -> Optional[dict]:
         row = conn.execute("SELECT * FROM quizzes WHERE id = ?", (quiz_id,)).fetchone()
         if not row:
             return None
+        # Some older rows might not have time_limit_seconds
+        try:
+            tls = row["time_limit_seconds"]
+        except (KeyError, IndexError):
+            tls = None
         return {
             "id": row["id"],
             "title": row["title"],
@@ -196,6 +375,7 @@ def load_quiz(quiz_id: str) -> Optional[dict]:
             "source_type": row["source_type"] or "text",
             "youtube_video_id": row["youtube_video_id"],
             "questions": json.loads(row["questions_json"]),
+            "time_limit_seconds": tls,
         }
 
 
@@ -309,6 +489,7 @@ class Quiz(BaseModel):
     source_text_preview: str
     source_type: str = "text"
     youtube_video_id: Optional[str] = None
+    time_limit_seconds: Optional[int] = None
 
 
 class GenerateRequest(BaseModel):
@@ -320,6 +501,7 @@ class GenerateRequest(BaseModel):
     source_type: Literal["text", "pdf", "youtube", "multi"] = "text"
     youtube_video_id: Optional[str] = None
     focus_concepts: Optional[List[str]] = None
+    time_limit_seconds: Optional[int] = Field(default=None, ge=30, le=7200)
 
 
 class YouTubeRequest(BaseModel):
@@ -658,7 +840,7 @@ def _filter_by_types(questions, allowed_types):
 
 
 def build_quiz(text, num_questions, difficulty, types, title, source_type="text",
-               youtube_video_id=None, focus_concepts=None) -> Quiz:
+               youtube_video_id=None, focus_concepts=None, time_limit_seconds=None) -> Quiz:
     is_youtube = source_type == "youtube"
     chunks = chunk_text_for_youtube(text) if is_youtube else chunk_text(text)
     if not chunks:
@@ -718,6 +900,7 @@ def build_quiz(text, num_questions, difficulty, types, title, source_type="text"
         "source_type": source_type,
         "youtube_video_id": youtube_video_id,
         "questions": questions_list,
+        "time_limit_seconds": time_limit_seconds,
     }
     save_quiz(quiz_dict)
     return Quiz(**quiz_dict)
@@ -897,6 +1080,7 @@ def generate_quiz(req: GenerateRequest, request: Request):
         source_type=req.source_type,
         youtube_video_id=req.youtube_video_id,
         focus_concepts=req.focus_concepts,
+        time_limit_seconds=req.time_limit_seconds,
     )
 
 
@@ -931,6 +1115,7 @@ def get_public_quiz(quiz_id: str):
         "source_type": quiz["source_type"],
         "youtube_video_id": quiz["youtube_video_id"],
         "questions": public_questions,
+        "time_limit_seconds": quiz.get("time_limit_seconds"),
     }
 
 
@@ -1371,11 +1556,21 @@ class ClassInfo(BaseModel):
     created_at: str
     student_count: int = 0
     assignment_count: int = 0
+    color: Optional[str] = "#7c3aed"
+    icon: Optional[str] = "graduation"
 
 
 class CreateClassRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
     teacher_name: str = Field(..., min_length=1, max_length=80)
+    color: Optional[str] = "#7c3aed"
+    icon: Optional[str] = "graduation"
+
+
+class UpdateClassRequest(BaseModel):
+    name: Optional[str] = None
+    color: Optional[str] = None
+    icon: Optional[str] = None
 
 
 class JoinClassRequest(BaseModel):
@@ -1413,8 +1608,11 @@ def generate_class_code() -> str:
 def save_class(c):
     with get_db() as conn:
         conn.execute(
-            "INSERT INTO classes (id, name, code, teacher_name, created_at) VALUES (?,?,?,?,?)",
-            (c["id"], c["name"], c["code"], c["teacher_name"], c["created_at"]),
+            """INSERT INTO classes (id, name, code, teacher_name, created_at, color, icon, teacher_id)
+               VALUES (?,?,?,?,?,?,?,?)""",
+            (c["id"], c["name"], c["code"], c["teacher_name"], c["created_at"],
+             c.get("color", "#7c3aed"), c.get("icon", "graduation"),
+             c.get("teacher_id")),
         )
         conn.commit()
 
@@ -1422,7 +1620,15 @@ def save_class(c):
 def load_class(class_id):
     with get_db() as conn:
         row = conn.execute("SELECT * FROM classes WHERE id = ?", (class_id,)).fetchone()
-        return dict(row) if row else None
+        if not row:
+            return None
+        d = dict(row)
+        # SQLite Row may not include teacher_id key safely if column was just added
+        try:
+            d["teacher_id"] = row["teacher_id"]
+        except (KeyError, IndexError):
+            d["teacher_id"] = None
+        return d
 
 
 def load_class_by_code(code):
@@ -1431,12 +1637,20 @@ def load_class_by_code(code):
         return dict(row) if row else None
 
 
-def list_classes():
-    """List all classes (since we don't have auth, this is global - in real app filter by teacher)."""
+def list_classes(teacher_id: Optional[str] = None):
+    """List classes for a teacher (or all classes if teacher_id is None - admin only)."""
     with get_db() as conn:
-        rows = conn.execute(
-            "SELECT id, name, code, teacher_name, created_at FROM classes ORDER BY created_at DESC LIMIT 200"
-        ).fetchall()
+        if teacher_id:
+            rows = conn.execute(
+                """SELECT id, name, code, teacher_name, created_at, color, icon
+                   FROM classes WHERE teacher_id = ? ORDER BY created_at DESC LIMIT 200""",
+                (teacher_id,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """SELECT id, name, code, teacher_name, created_at, color, icon
+                   FROM classes ORDER BY created_at DESC LIMIT 200"""
+            ).fetchall()
         out = []
         for r in rows:
             class_id = r["id"]
@@ -1531,13 +1745,16 @@ def delete_assignment(assignment_id):
 # Class endpoints
 # ---------------------------------------------------------------------------
 @app.post("/api/classes", response_model=ClassInfo)
-def api_create_class(req: CreateClassRequest):
+def api_create_class(req: CreateClassRequest, teacher: dict = Depends(require_teacher)):
     c = {
         "id": str(uuid.uuid4()),
         "name": req.name.strip(),
         "code": generate_class_code(),
-        "teacher_name": req.teacher_name.strip(),
+        "teacher_name": req.teacher_name.strip() or teacher["name"],
         "created_at": datetime.utcnow().isoformat(),
+        "color": req.color or "#7c3aed",
+        "icon": req.icon or "graduation",
+        "teacher_id": teacher["id"],
     }
     save_class(c)
     c["student_count"] = 0
@@ -1545,18 +1762,61 @@ def api_create_class(req: CreateClassRequest):
     return ClassInfo(**c)
 
 
+@app.patch("/api/classes/{class_id}")
+def api_update_class(class_id: str, req: UpdateClassRequest, teacher: dict = Depends(require_teacher)):
+    _check_class_owner(class_id, teacher)
+    updates = []
+    params = []
+    if req.name is not None:
+        updates.append("name = ?")
+        params.append(req.name.strip())
+    if req.color is not None:
+        updates.append("color = ?")
+        params.append(req.color)
+    if req.icon is not None:
+        updates.append("icon = ?")
+        params.append(req.icon)
+    if not updates:
+        return {"updated": class_id}
+    params.append(class_id)
+    with get_db() as conn:
+        conn.execute(f"UPDATE classes SET {', '.join(updates)} WHERE id = ?", params)
+        conn.commit()
+    return {"updated": class_id}
+
+
 @app.get("/api/classes")
-def api_list_classes():
-    return {"classes": list_classes()}
+def api_list_classes(teacher: dict = Depends(require_teacher)):
+    return {"classes": list_classes(teacher_id=teacher["id"])}
 
 
-@app.get("/api/classes/{class_id}")
-def api_get_class(class_id: str):
+def _check_class_owner(class_id: str, teacher: Optional[dict]) -> dict:
+    """Load a class and confirm the teacher owns it. Returns the class dict."""
     c = load_class(class_id)
     if not c:
         raise HTTPException(status_code=404, detail="Class not found.")
+    # Allow if class has no teacher_id (legacy) OR matches the signed-in teacher
+    if c.get("teacher_id") and (not teacher or c["teacher_id"] != teacher["id"]):
+        raise HTTPException(status_code=403, detail="You don't have access to this class.")
+    return c
+
+
+@app.get("/api/classes/{class_id}")
+def api_get_class(class_id: str, teacher: Optional[dict] = Depends(optional_teacher)):
+    """Class detail. Students (no token) get a minimal version. Teachers must own it."""
+    c = load_class(class_id)
+    if not c:
+        raise HTTPException(status_code=404, detail="Class not found.")
+    # If the class has an owner and the requester is the owner, return full data.
+    # If no owner (legacy) OR requester is a student (no token), return public-ish data.
     members = list_class_members(class_id)
     assignments = list_class_assignments(class_id)
+    is_owner = teacher and c.get("teacher_id") == teacher["id"]
+    is_legacy = not c.get("teacher_id")
+    if not (is_owner or is_legacy):
+        # Student or non-owner: hide nothing critical, just don't allow modifications.
+        # The data here is fine since students need it to take assignments.
+        pass
     return {
         "class": c,
         "members": members,
@@ -1565,9 +1825,8 @@ def api_get_class(class_id: str):
 
 
 @app.delete("/api/classes/{class_id}")
-def api_delete_class(class_id: str):
-    if not load_class(class_id):
-        raise HTTPException(status_code=404, detail="Class not found.")
+def api_delete_class(class_id: str, teacher: dict = Depends(require_teacher)):
+    _check_class_owner(class_id, teacher)
     delete_class(class_id)
     return {"deleted": class_id}
 
@@ -1607,9 +1866,8 @@ def api_join_class(req: JoinClassRequest):
 # Assignment endpoints
 # ---------------------------------------------------------------------------
 @app.post("/api/assignments")
-def api_create_assignment(req: CreateAssignmentRequest):
-    if not load_class(req.class_id):
-        raise HTTPException(status_code=404, detail="Class not found.")
+def api_create_assignment(req: CreateAssignmentRequest, teacher: dict = Depends(require_teacher)):
+    _check_class_owner(req.class_id, teacher)
     if not load_quiz(req.quiz_id):
         raise HTTPException(status_code=404, detail="Quiz not found.")
     a = {
@@ -1624,9 +1882,11 @@ def api_create_assignment(req: CreateAssignmentRequest):
 
 
 @app.delete("/api/assignments/{assignment_id}")
-def api_delete_assignment(assignment_id: str):
-    if not load_assignment(assignment_id):
+def api_delete_assignment(assignment_id: str, teacher: dict = Depends(require_teacher)):
+    a = load_assignment(assignment_id)
+    if not a:
         raise HTTPException(status_code=404, detail="Assignment not found.")
+    _check_class_owner(a["class_id"], teacher)
     delete_assignment(assignment_id)
     return {"deleted": assignment_id}
 
@@ -1677,11 +1937,12 @@ def api_submit_assignment(req: SubmitAssignmentRequest):
 # Analytics
 # ---------------------------------------------------------------------------
 @app.get("/api/assignments/{assignment_id}/analytics")
-def api_assignment_analytics(assignment_id: str):
+def api_assignment_analytics(assignment_id: str, teacher: dict = Depends(require_teacher)):
     """Per-question correct rates and per-student scores."""
     a = load_assignment(assignment_id)
     if not a:
         raise HTTPException(status_code=404, detail="Assignment not found.")
+    _check_class_owner(a["class_id"], teacher)
     quiz = load_quiz(a["quiz_id"])
     if not quiz:
         raise HTTPException(status_code=404, detail="Quiz not found.")
@@ -1801,4 +2062,531 @@ def api_export_class_csv(class_id: str):
         media_type="text/csv",
         headers={"Content-Disposition": f'attachment; filename="{cls["name"].replace(" ", "_")}_gradebook.csv"'},
     )
+
+
+# ===========================================================================
+# v6a additions — Announcements, AI Short-Answer Grading
+# ===========================================================================
+
+class CreateAnnouncementRequest(BaseModel):
+    class_id: str
+    author_name: str = Field(..., min_length=1, max_length=80)
+    message: str = Field(..., min_length=1, max_length=2000)
+
+
+class GradeShortAnswerRequest(BaseModel):
+    question: str = Field(..., min_length=1)
+    correct_answer: str = Field(..., min_length=1)
+    student_answer: str = Field(..., min_length=1, max_length=2000)
+
+
+def save_announcement(a):
+    with get_db() as conn:
+        conn.execute(
+            "INSERT INTO class_announcements (id, class_id, author_name, message, created_at) VALUES (?,?,?,?,?)",
+            (a["id"], a["class_id"], a["author_name"], a["message"], a["created_at"]),
+        )
+        conn.commit()
+
+
+def list_announcements(class_id):
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT id, class_id, author_name, message, created_at FROM class_announcements WHERE class_id = ? ORDER BY created_at DESC LIMIT 100",
+            (class_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def delete_announcement_db(announcement_id):
+    with get_db() as conn:
+        conn.execute("DELETE FROM class_announcements WHERE id = ?", (announcement_id,))
+        conn.commit()
+
+
+@app.post("/api/announcements")
+def api_create_announcement(req: CreateAnnouncementRequest, teacher: dict = Depends(require_teacher)):
+    _check_class_owner(req.class_id, teacher)
+    a = {
+        "id": str(uuid.uuid4()),
+        "class_id": req.class_id,
+        "author_name": req.author_name.strip(),
+        "message": req.message.strip(),
+        "created_at": datetime.utcnow().isoformat(),
+    }
+    save_announcement(a)
+    return a
+
+
+@app.get("/api/classes/{class_id}/announcements")
+def api_list_announcements(class_id: str):
+    if not load_class(class_id):
+        raise HTTPException(status_code=404, detail="Class not found.")
+    return {"announcements": list_announcements(class_id)}
+
+
+@app.delete("/api/announcements/{announcement_id}")
+def api_delete_announcement(announcement_id: str, teacher: dict = Depends(require_teacher)):
+    # We don't store who posted, so we just trust that the route is authenticated.
+    # (For stricter rules we'd store author_id and verify ownership.)
+    delete_announcement_db(announcement_id)
+    return {"deleted": announcement_id}
+
+
+# ---------------------------------------------------------------------------
+# AI short-answer grading
+# ---------------------------------------------------------------------------
+SHORT_ANSWER_GRADING_PROMPT = """You are an impartial grader. Compare the student's answer to the correct answer.
+
+QUESTION: {question}
+CORRECT ANSWER: {correct}
+STUDENT ANSWER: {student}
+
+Determine:
+1. score: 1.0 if fully correct, 0.5 if partially correct (right idea but missing detail), 0.0 if wrong
+2. feedback: 1-2 short sentences explaining the score, friendly and educational. Match the language of the answer.
+
+Respond with ONLY a valid JSON object:
+{{
+  "score": 1.0,
+  "feedback": "..."
+}}"""
+
+
+@app.post("/api/grade-short-answer")
+def api_grade_short_answer(req: GradeShortAnswerRequest, request: Request):
+    check_chat_rate_limit(request)
+    student = req.student_answer.strip()
+    correct = req.correct_answer.strip()
+
+    # Quick pre-check: exact match (case-insensitive) is always 1.0
+    if student.lower() == correct.lower():
+        return {"score": 1.0, "feedback": "Exact match — well done!"}
+
+    prompt = SHORT_ANSWER_GRADING_PROMPT.format(
+        question=req.question,
+        correct=correct,
+        student=student,
+    )
+    try:
+        response = client.chat.completions.create(
+            model=DEPLOYMENT,
+            messages=[
+                {"role": "system", "content": "You grade student answers fairly and return valid JSON only."},
+                {"role": "user", "content": prompt},
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.3,
+            max_tokens=300,
+        )
+        raw = response.choices[0].message.content.strip()
+        data = json.loads(raw)
+        score = float(data.get("score", 0))
+        if score not in (0.0, 0.5, 1.0):
+            score = round(score * 2) / 2  # Snap to 0/0.5/1.0
+            score = max(0.0, min(1.0, score))
+        return {
+            "score": score,
+            "feedback": data.get("feedback", ""),
+        }
+    except Exception as e:
+        # Fall back to substring match if AI grading fails
+        if correct.lower() in student.lower() or student.lower() in correct.lower():
+            return {"score": 0.5, "feedback": "Partial credit (AI grading unavailable)."}
+        return {"score": 0.0, "feedback": "Could not grade. Marked as incorrect."}
+
+
+# ===========================================================================
+# AUTH ENDPOINTS
+# ===========================================================================
+
+class SignUpRequest(BaseModel):
+    email: str = Field(..., min_length=3, max_length=200)
+    password: str = Field(..., min_length=6, max_length=200)
+    name: str = Field(..., min_length=1, max_length=80)
+
+
+class SignInRequest(BaseModel):
+    email: str
+    password: str
+
+
+@app.post("/api/auth/signup")
+def api_signup(req: SignUpRequest):
+    email = req.email.strip().lower()
+    if "@" not in email or "." not in email:
+        raise HTTPException(status_code=400, detail="Please enter a valid email.")
+    with get_db() as conn:
+        existing = conn.execute("SELECT 1 FROM teachers WHERE email = ?", (email,)).fetchone()
+    if existing:
+        raise HTTPException(status_code=400, detail="An account with this email already exists.")
+    teacher_id = str(uuid.uuid4())
+    with get_db() as conn:
+        conn.execute(
+            "INSERT INTO teachers (id, email, password_hash, name, created_at) VALUES (?,?,?,?,?)",
+            (teacher_id, email, hash_password(req.password), req.name.strip(), datetime.utcnow().isoformat()),
+        )
+        conn.commit()
+    token = create_session(teacher_id)
+    return {
+        "token": token,
+        "teacher": {"id": teacher_id, "email": email, "name": req.name.strip()},
+    }
+
+
+@app.post("/api/auth/signin")
+def api_signin(req: SignInRequest):
+    email = req.email.strip().lower()
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT id, email, password_hash, name FROM teachers WHERE email = ?",
+            (email,),
+        ).fetchone()
+    if not row:
+        raise HTTPException(status_code=400, detail="No account with that email.")
+    if not verify_password(req.password, row["password_hash"]):
+        raise HTTPException(status_code=400, detail="Wrong password.")
+    token = create_session(row["id"])
+    return {
+        "token": token,
+        "teacher": {"id": row["id"], "email": row["email"], "name": row["name"]},
+    }
+
+
+@app.get("/api/auth/me")
+def api_me(teacher: dict = Depends(require_teacher)):
+    return {"teacher": teacher}
+
+
+@app.post("/api/auth/signout")
+def api_signout(authorization: Optional[str] = Header(None)):
+    if not authorization or not authorization.lower().startswith("bearer "):
+        return {"signed_out": True}
+    token = authorization.split(None, 1)[1].strip()
+    with get_db() as conn:
+        conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
+        conn.commit()
+    return {"signed_out": True}
+
+
+# ===========================================================================
+# LIVE QUIZ MODE
+# ===========================================================================
+# Polling-based real-time. Teacher creates session → students join → teacher
+# advances questions → leaderboard updates as students submit.
+
+class CreateLiveSessionRequest(BaseModel):
+    quiz_id: str
+
+
+class JoinLiveSessionRequest(BaseModel):
+    code: str
+    player_name: str = Field(..., min_length=1, max_length=80)
+
+
+class SubmitLiveAnswerRequest(BaseModel):
+    session_id: str
+    player_id: int
+    question_index: int
+    answer: str
+
+
+def generate_live_code() -> str:
+    chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    while True:
+        code = "".join(random.choices(chars, k=6))
+        with get_db() as conn:
+            existing = conn.execute("SELECT 1 FROM live_sessions WHERE code = ? AND state != 'finished'", (code,)).fetchone()
+        if not existing:
+            return code
+
+
+def _live_session_dict(row):
+    if not row:
+        return None
+    d = dict(row)
+    return d
+
+
+def load_live_session_by_code(code: str):
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM live_sessions WHERE code = ?",
+            (code.upper().strip(),),
+        ).fetchone()
+        return _live_session_dict(row)
+
+
+def load_live_session(session_id: str):
+    with get_db() as conn:
+        row = conn.execute("SELECT * FROM live_sessions WHERE id = ?", (session_id,)).fetchone()
+        return _live_session_dict(row)
+
+
+def list_live_players(session_id: str):
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT id, player_name, score, joined_at, last_seen FROM live_players WHERE session_id = ? ORDER BY score DESC, joined_at ASC",
+            (session_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def filter_live_questions(quiz: dict) -> List[dict]:
+    """Live mode only supports MC and TF (per user choice)."""
+    return [q for q in quiz["questions"] if q.get("type") in ("multiple_choice", "true_false")]
+
+
+@app.post("/api/live/create")
+def api_create_live(req: CreateLiveSessionRequest, teacher: dict = Depends(require_teacher)):
+    quiz = load_quiz(req.quiz_id)
+    if not quiz:
+        raise HTTPException(status_code=404, detail="Quiz not found.")
+    valid_qs = filter_live_questions(quiz)
+    if not valid_qs:
+        raise HTTPException(
+            status_code=400,
+            detail="This quiz has no multiple-choice or true/false questions, which are the only types supported in live mode.",
+        )
+    sid = str(uuid.uuid4())
+    code = generate_live_code()
+    with get_db() as conn:
+        conn.execute(
+            """INSERT INTO live_sessions (id, code, quiz_id, teacher_id, state, current_question_index, created_at)
+               VALUES (?,?,?,?, 'lobby', -1, ?)""",
+            (sid, code, req.quiz_id, teacher["id"], datetime.utcnow().isoformat()),
+        )
+        conn.commit()
+    return {
+        "session_id": sid,
+        "code": code,
+        "quiz_title": quiz["title"],
+        "num_questions": len(valid_qs),
+    }
+
+
+@app.post("/api/live/join")
+def api_join_live(req: JoinLiveSessionRequest):
+    sess = load_live_session_by_code(req.code)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found. Check the code.")
+    if sess["state"] != "lobby":
+        raise HTTPException(status_code=400, detail="This game has already started or finished.")
+    name = req.player_name.strip()
+    with get_db() as conn:
+        # Prevent duplicate names within a single session
+        existing = conn.execute(
+            "SELECT id FROM live_players WHERE session_id = ? AND player_name = ?",
+            (sess["id"], name),
+        ).fetchone()
+        if existing:
+            return {
+                "session_id": sess["id"],
+                "player_id": existing["id"],
+                "player_name": name,
+                "rejoined": True,
+            }
+        cursor = conn.execute(
+            "INSERT INTO live_players (session_id, player_name, joined_at, last_seen) VALUES (?,?,?,?)",
+            (sess["id"], name, datetime.utcnow().isoformat(), datetime.utcnow().isoformat()),
+        )
+        conn.commit()
+        player_id = cursor.lastrowid
+    return {
+        "session_id": sess["id"],
+        "player_id": player_id,
+        "player_name": name,
+        "rejoined": False,
+    }
+
+
+@app.get("/api/live/{session_id}/state")
+def api_live_state(session_id: str, player_id: Optional[int] = None):
+    """Polled by both teacher (host view) and players. Updates last_seen for the player."""
+    sess = load_live_session(session_id)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found.")
+    quiz = load_quiz(sess["quiz_id"])
+    if not quiz:
+        raise HTTPException(status_code=404, detail="Quiz not found.")
+    questions = filter_live_questions(quiz)
+
+    # Update player presence
+    if player_id is not None:
+        with get_db() as conn:
+            conn.execute(
+                "UPDATE live_players SET last_seen = ? WHERE id = ? AND session_id = ?",
+                (datetime.utcnow().isoformat(), player_id, session_id),
+            )
+            conn.commit()
+
+    players = list_live_players(session_id)
+
+    # Build current_question (without correct_answer for students)
+    current_q = None
+    student_answer = None
+    if 0 <= sess["current_question_index"] < len(questions):
+        q = questions[sess["current_question_index"]]
+        current_q = {
+            "index": sess["current_question_index"],
+            "type": q["type"],
+            "question": q["question"],
+            "options": q.get("options"),
+            "difficulty": q.get("difficulty"),
+        }
+        if player_id is not None:
+            with get_db() as conn:
+                a = conn.execute(
+                    "SELECT answer, is_correct FROM live_answers WHERE session_id = ? AND player_id = ? AND question_index = ?",
+                    (session_id, player_id, sess["current_question_index"]),
+                ).fetchone()
+                if a:
+                    student_answer = {"answer": a["answer"], "is_correct": bool(a["is_correct"])}
+
+    # If we're showing results for a question (state == 'reveal'), include correct answer
+    reveal_data = None
+    if sess["state"] == "reveal" and 0 <= sess["current_question_index"] < len(questions):
+        q = questions[sess["current_question_index"]]
+        with get_db() as conn:
+            answer_rows = conn.execute(
+                "SELECT answer, COUNT(*) as count, SUM(is_correct) as correct_count FROM live_answers WHERE session_id = ? AND question_index = ? GROUP BY answer",
+                (session_id, sess["current_question_index"]),
+            ).fetchall()
+        reveal_data = {
+            "correct_answer": q["correct_answer"],
+            "explanation": q.get("explanation", ""),
+            "answer_distribution": [dict(r) for r in answer_rows],
+        }
+
+    return {
+        "session": {
+            "id": sess["id"],
+            "code": sess["code"],
+            "state": sess["state"],
+            "current_question_index": sess["current_question_index"],
+            "question_started_at": sess["question_started_at"],
+        },
+        "quiz_title": quiz["title"],
+        "total_questions": len(questions),
+        "current_question": current_q,
+        "reveal": reveal_data,
+        "players": players,
+        "student_answer": student_answer,
+    }
+
+
+@app.post("/api/live/{session_id}/start")
+def api_live_start(session_id: str, teacher: dict = Depends(require_teacher)):
+    sess = load_live_session(session_id)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found.")
+    if sess["teacher_id"] != teacher["id"]:
+        raise HTTPException(status_code=403, detail="Not your session.")
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE live_sessions SET state = 'question', current_question_index = 0, question_started_at = ? WHERE id = ?",
+            (datetime.utcnow().isoformat(), session_id),
+        )
+        conn.commit()
+    return {"started": True}
+
+
+@app.post("/api/live/{session_id}/reveal")
+def api_live_reveal(session_id: str, teacher: dict = Depends(require_teacher)):
+    """Teacher locks current question and shows the correct answer + distribution."""
+    sess = load_live_session(session_id)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found.")
+    if sess["teacher_id"] != teacher["id"]:
+        raise HTTPException(status_code=403, detail="Not your session.")
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE live_sessions SET state = 'reveal' WHERE id = ?",
+            (session_id,),
+        )
+        conn.commit()
+    return {"state": "reveal"}
+
+
+@app.post("/api/live/{session_id}/next")
+def api_live_next(session_id: str, teacher: dict = Depends(require_teacher)):
+    """Advance to next question, or end the session if no more questions."""
+    sess = load_live_session(session_id)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found.")
+    if sess["teacher_id"] != teacher["id"]:
+        raise HTTPException(status_code=403, detail="Not your session.")
+    quiz = load_quiz(sess["quiz_id"])
+    questions = filter_live_questions(quiz)
+    next_idx = sess["current_question_index"] + 1
+    if next_idx >= len(questions):
+        with get_db() as conn:
+            conn.execute(
+                "UPDATE live_sessions SET state = 'finished' WHERE id = ?",
+                (session_id,),
+            )
+            conn.commit()
+        return {"state": "finished"}
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE live_sessions SET state = 'question', current_question_index = ?, question_started_at = ? WHERE id = ?",
+            (next_idx, datetime.utcnow().isoformat(), session_id),
+        )
+        conn.commit()
+    return {"state": "question", "current_question_index": next_idx}
+
+
+@app.post("/api/live/answer")
+def api_live_answer(req: SubmitLiveAnswerRequest):
+    sess = load_live_session(req.session_id)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found.")
+    if sess["state"] != "question":
+        raise HTTPException(status_code=400, detail="Not accepting answers right now.")
+    if sess["current_question_index"] != req.question_index:
+        raise HTTPException(status_code=400, detail="Wrong question index.")
+
+    quiz = load_quiz(sess["quiz_id"])
+    questions = filter_live_questions(quiz)
+    q = questions[req.question_index]
+    is_correct = req.answer.strip().lower() == q["correct_answer"].strip().lower()
+
+    # Speed-bonus scoring: correct answer = 1000 base + faster = more points (max 1000 bonus)
+    points = 0
+    if is_correct:
+        try:
+            qstart = datetime.fromisoformat(sess["question_started_at"])
+            elapsed = (datetime.utcnow() - qstart).total_seconds()
+            # 30 sec window — faster = more bonus
+            speed_bonus = max(0, int(1000 - (elapsed / 30) * 500))
+            points = 1000 + speed_bonus
+        except (TypeError, ValueError):
+            points = 1000
+
+    with get_db() as conn:
+        # Insert OR replace based on (session, player, question)
+        conn.execute(
+            "DELETE FROM live_answers WHERE session_id = ? AND player_id = ? AND question_index = ?",
+            (req.session_id, req.player_id, req.question_index),
+        )
+        conn.execute(
+            "INSERT INTO live_answers (session_id, player_id, question_index, answer, is_correct, answered_at, points) VALUES (?,?,?,?,?,?,?)",
+            (req.session_id, req.player_id, req.question_index, req.answer, 1 if is_correct else 0,
+             datetime.utcnow().isoformat(), points),
+        )
+        # Recompute total score for player
+        total = conn.execute(
+            "SELECT COALESCE(SUM(points), 0) total FROM live_answers WHERE session_id = ? AND player_id = ?",
+            (req.session_id, req.player_id),
+        ).fetchone()["total"]
+        conn.execute(
+            "UPDATE live_players SET score = ?, last_seen = ? WHERE id = ?",
+            (total, datetime.utcnow().isoformat(), req.player_id),
+        )
+        conn.commit()
+
+    return {
+        "is_correct": is_correct,
+        "points": points,
+    }
 

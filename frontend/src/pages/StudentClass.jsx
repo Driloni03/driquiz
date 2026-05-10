@@ -2,8 +2,15 @@ import { useState, useEffect } from 'react'
 import { useParams, Link, useLocation } from 'react-router-dom'
 import {
   GraduationCap, FileText, Clock, Calendar, Loader2, ArrowLeft, Play, ArrowRight,
+  Megaphone, BookOpen, Brain, Trophy, Star, Atom, Beaker, Code,
 } from 'lucide-react'
-import { getClass } from '../api'
+import { getClass, listAnnouncements } from '../api'
+
+const ICON_MAP = {
+  graduation: GraduationCap, book: BookOpen, brain: Brain, trophy: Trophy,
+  star: Star, atom: Atom, beaker: Beaker, code: Code,
+}
+const getIconComponent = (id) => ICON_MAP[id] || GraduationCap
 
 const STORAGE_STUDENT = 'driquiz_student_name'
 
@@ -11,6 +18,7 @@ export default function StudentClass() {
   const { classId } = useParams()
   const location = useLocation()
   const [data, setData] = useState(null)
+  const [announcements, setAnnouncements] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const studentName = location.state?.studentName || localStorage.getItem(STORAGE_STUDENT) || 'Student'
@@ -20,8 +28,12 @@ export default function StudentClass() {
   const load = async () => {
     setLoading(true)
     try {
-      const result = await getClass(classId)
+      const [result, anns] = await Promise.all([
+        getClass(classId),
+        listAnnouncements(classId).catch(() => []),
+      ])
       setData(result)
+      setAnnouncements(anns)
     } catch (err) {
       setError(err.response?.data?.detail || 'Could not load class.')
     } finally {
@@ -73,10 +85,36 @@ export default function StudentClass() {
     <div className="container">
       <Link to="/join" className="back-link"><ArrowLeft size={14} /> Join another class</Link>
 
-      <div className="header">
-        <h1><GraduationCap size={28} style={{ verticalAlign: 'middle', marginRight: 8 }} /> {cls.name}</h1>
-        <p>Welcome, <strong>{studentName}</strong> · Teacher: {cls.teacher_name}</p>
+      <div className="class-header" style={{ borderColor: cls.color || '#7c3aed' }}>
+        <div className="class-header-icon" style={{ background: `linear-gradient(135deg, ${cls.color || '#7c3aed'}, ${cls.color || '#7c3aed'}dd)` }}>
+          {(() => {
+            const Icon = getIconComponent(cls.icon)
+            return <Icon size={28} />
+          })()}
+        </div>
+        <div className="class-header-info">
+          <h1>{cls.name}</h1>
+          <p>Welcome, <strong>{studentName}</strong> · Teacher: {cls.teacher_name}</p>
+        </div>
       </div>
+
+      {announcements.length > 0 && (
+        <div className="card">
+          <h2><Megaphone size={20} /> Announcements ({announcements.length})</h2>
+          <div className="announcement-list">
+            {announcements.slice(0, 5).map(a => (
+              <div key={a.id} className="announcement-row" style={{ paddingRight: '0.75rem' }}>
+                <div className="announcement-content">
+                  <div className="announcement-meta">
+                    <strong>{a.author_name}</strong> · {new Date(a.created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
+                  </div>
+                  <div className="announcement-message">{a.message}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div className="card">
         <h2><FileText size={20} /> Assignments</h2>
