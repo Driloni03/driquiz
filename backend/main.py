@@ -12,6 +12,14 @@ import sqlite3
 import secrets
 import hashlib
 from contextlib import contextmanager
+
+# Postgres driver (only imported if DATABASE_URL is set)
+try:
+    import psycopg2
+    import psycopg2.extras
+    HAS_PSYCOPG2 = True
+except ImportError:
+    HAS_PSYCOPG2 = False
 from typing import List, Optional, Literal
 from datetime import datetime, timedelta
 from collections import defaultdict, deque
@@ -49,19 +57,142 @@ client = AzureOpenAI(
 DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT")
 
 # ---------------------------------------------------------------------------
-# SQLite
+# Database abstraction layer — supports both SQLite (local) and Postgres (prod)
 # ---------------------------------------------------------------------------
 DB_PATH = os.getenv("DB_PATH", "quizzes.db")
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+USE_POSTGRES = DATABASE_URL.startswith("postgres") and HAS_PSYCOPG2
+
+if DATABASE_URL and not HAS_PSYCOPG2:
+    print("[DB] WARNING: DATABASE_URL is set but psycopg2 is not installed. Falling back to SQLite.")
+    print("[DB] Install with: pip install psycopg2-binary")
+
+print(f"[DB] Using: {'PostgreSQL (Supabase)' if USE_POSTGRES else 'SQLite (local file: ' + DB_PATH + ')'}")
+
+
+class PostgresRowAdapter:
+    """Wraps a psycopg2 RealDictRow so it behaves like sqlite3.Row.
+    Supports both dict-style access ['col'] and returns None for missing keys gracefully."""
+    def __init__(self, row):
+        self._row = row or {}
+
+    def __getitem__(self, key):
+        return self._row[key]
+
+    def __contains__(self, key):
+        return key in self._row
+
+    def get(self, key, default=None):
+        return self._row.get(key, default)
+
+    def keys(self):
+        return self._row.keys()
+
+    def __iter__(self):
+        return iter(self._row.values())
+
+
+class DBConnectionWrapper:
+    """Wraps either a sqlite3.Connection or psycopg2 connection to give
+    a unified interface: .execute() and .commit(). Converts placeholders
+    from '?' (SQLite) to '%s' (Postgres) transparently."""
+
+    def __init__(self, conn, is_postgres: bool):
+        self._conn = conn
+        self._is_pg = is_postgres
+
+    def execute(self, sql, params=None):
+        if self._is_pg:
+            # Convert SQLite '?' placeholders to Postgres '%s'
+            # (Simple char replacement — we don't use '?' in string literals in this codebase.)
+            sql = sql.replace("?", "%s")
+            # Convert some SQLite-specific syntax to Postgres
+            sql = self._translate_sql(sql)
+            cursor = self._conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cursor.execute(sql, params or ())
+            return PGCursorWrapper(cursor)
+        else:
+            if params is None:
+                return self._conn.execute(sql)
+            return self._conn.execute(sql, params)
+
+    def _translate_sql(self, sql):
+        """Convert SQLite-specific SQL to Postgres equivalents."""
+        # AUTOINCREMENT → SERIAL (handled in CREATE TABLE)
+        sql = re.sub(r"INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY", sql, flags=re.IGNORECASE)
+        # INSERT OR REPLACE → INSERT ... ON CONFLICT DO UPDATE
+        # This is complex; we detect these at write-time in save_quiz etc. instead
+        # For now just rewrite as INSERT (the caller must ensure conflict handling)
+        # Actually: we handle this in the calling code (see save_quiz below)
+        return sql
+
+    def commit(self):
+        self._conn.commit()
+
+    def rollback(self):
+        self._conn.rollback()
+
+
+class PGCursorWrapper:
+    """Wraps a psycopg2 cursor to behave like a sqlite3 cursor result."""
+    def __init__(self, cursor):
+        self._cursor = cursor
+
+    def fetchone(self):
+        row = self._cursor.fetchone()
+        if row is None:
+            return None
+        return PostgresRowAdapter(row)
+
+    def fetchall(self):
+        return [PostgresRowAdapter(r) for r in self._cursor.fetchall()]
+
+    @property
+    def lastrowid(self):
+        # Postgres doesn't have lastrowid the same way SQLite does.
+        # For our use case (live_players table with SERIAL id), we should use RETURNING id
+        # in the INSERT. This is handled in the specific caller.
+        try:
+            return self._cursor.fetchone().get('id')
+        except Exception:
+            return None
 
 
 @contextmanager
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    try:
-        yield conn
-    finally:
-        conn.close()
+    if USE_POSTGRES:
+        conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+        try:
+            yield DBConnectionWrapper(conn, is_postgres=True)
+        finally:
+            conn.close()
+    else:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        try:
+            yield DBConnectionWrapper(conn, is_postgres=False)
+        finally:
+            conn.close()
+
+
+def _upsert_sql(table, columns, key="id"):
+    """Generate an INSERT ... (ON CONFLICT DO UPDATE) SQL for the current DB.
+    - For SQLite: INSERT OR REPLACE INTO ...
+    - For Postgres: INSERT ... ON CONFLICT (key) DO UPDATE SET col=EXCLUDED.col ...
+    Returns the SQL string with '?' placeholders (get_db translates to %s for PG).
+    """
+    cols_sql = ", ".join(columns)
+    placeholders = ", ".join(["?"] * len(columns))
+    if USE_POSTGRES:
+        # Update every column except the key on conflict
+        update_cols = [c for c in columns if c != key]
+        update_sql = ", ".join([f"{c} = EXCLUDED.{c}" for c in update_cols])
+        return (
+            f"INSERT INTO {table} ({cols_sql}) VALUES ({placeholders}) "
+            f"ON CONFLICT ({key}) DO UPDATE SET {update_sql}"
+        )
+    else:
+        return f"INSERT OR REPLACE INTO {table} ({cols_sql}) VALUES ({placeholders})"
 
 
 def init_db():
@@ -155,16 +286,20 @@ def init_db():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_announcements_class ON class_announcements(class_id, created_at DESC)")
 
         # Add new columns to existing tables (idempotent migrations)
+        # In Postgres, a failed statement aborts the whole transaction, so we
+        # commit after each successful migration and rollback after each failure.
         for sql in [
             "ALTER TABLE classes ADD COLUMN color TEXT DEFAULT '#7c3aed'",
             "ALTER TABLE classes ADD COLUMN icon TEXT DEFAULT 'graduation'",
             "ALTER TABLE quizzes ADD COLUMN time_limit_seconds INTEGER",
-            "ALTER TABLE classes ADD COLUMN teacher_id TEXT",  # nullable for legacy
+            "ALTER TABLE classes ADD COLUMN teacher_id TEXT",
         ]:
             try:
                 conn.execute(sql)
-            except sqlite3.OperationalError:
-                pass
+                conn.commit()
+            except Exception:
+                if USE_POSTGRES:
+                    conn.rollback()
 
         # Auth tables
         conn.execute("""
@@ -247,7 +382,7 @@ def init_db():
                     conn.execute("DELETE FROM class_announcements WHERE class_id IN (SELECT id FROM classes WHERE teacher_id IS NULL)")
                     conn.execute("DELETE FROM classes WHERE teacher_id IS NULL")
                     print(f"[AUTH] Cleared {legacy_count['c']} legacy classes (no owner) - clean start enabled.")
-        except sqlite3.OperationalError:
+        except Exception:
             pass
         # Add class_id and assignment_id to leaderboard for class-scoped scores
         for sql in [
@@ -256,8 +391,10 @@ def init_db():
         ]:
             try:
                 conn.execute(sql)
-            except sqlite3.OperationalError:
-                pass
+                conn.commit()
+            except Exception:
+                if USE_POSTGRES:
+                    conn.rollback()
 
         # Migrate older DBs
         for sql in [
@@ -266,8 +403,10 @@ def init_db():
         ]:
             try:
                 conn.execute(sql)
-            except sqlite3.OperationalError:
-                pass
+                conn.commit()
+            except Exception:
+                if USE_POSTGRES:
+                    conn.rollback()
         conn.commit()
 
 
@@ -338,22 +477,20 @@ def optional_teacher(authorization: Optional[str] = Header(None)) -> Optional[di
 
 
 def save_quiz(quiz_dict: dict):
+    columns = ["id", "title", "created_at", "source_text_preview", "source_type",
+               "youtube_video_id", "questions_json", "time_limit_seconds"]
+    sql = _upsert_sql("quizzes", columns)
     with get_db() as conn:
-        conn.execute(
-            """INSERT OR REPLACE INTO quizzes
-            (id, title, created_at, source_text_preview, source_type, youtube_video_id, questions_json, time_limit_seconds)
-            VALUES (?,?,?,?,?,?,?,?)""",
-            (
-                quiz_dict["id"],
-                quiz_dict["title"],
-                quiz_dict["created_at"],
-                quiz_dict["source_text_preview"],
-                quiz_dict.get("source_type", "text"),
-                quiz_dict.get("youtube_video_id"),
-                json.dumps(quiz_dict["questions"]),
-                quiz_dict.get("time_limit_seconds"),
-            ),
-        )
+        conn.execute(sql, (
+            quiz_dict["id"],
+            quiz_dict["title"],
+            quiz_dict["created_at"],
+            quiz_dict["source_text_preview"],
+            quiz_dict.get("source_type", "text"),
+            quiz_dict.get("youtube_video_id"),
+            json.dumps(quiz_dict["questions"]),
+            quiz_dict.get("time_limit_seconds"),
+        ))
         conn.commit()
 
 
@@ -1243,7 +1380,7 @@ class GenerateFlashcardsFromQuizRequest(BaseModel):
 def save_flashcard_set(fs_dict):
     with get_db() as conn:
         conn.execute(
-            "INSERT OR REPLACE INTO flashcard_sets (id, title, created_at, source_text_preview, cards_json) VALUES (?,?,?,?,?)",
+            _upsert_sql("flashcard_sets", ["id", "title", "created_at", "source_text_preview", "cards_json"]),
             (fs_dict["id"], fs_dict["title"], fs_dict["created_at"],
              fs_dict["source_text_preview"], json.dumps(fs_dict["cards"])),
         )
@@ -1423,7 +1560,7 @@ class GenerateNotesRequest(BaseModel):
 def save_note(note_dict):
     with get_db() as conn:
         conn.execute(
-            "INSERT OR REPLACE INTO study_notes (id, title, created_at, source_text_preview, format, content_md) VALUES (?,?,?,?,?,?)",
+            _upsert_sql("study_notes", ["id", "title", "created_at", "source_text_preview", "format", "content_md"]),
             (note_dict["id"], note_dict["title"], note_dict["created_at"],
              note_dict["source_text_preview"], note_dict["format"], note_dict["content_md"]),
         )
@@ -2386,12 +2523,21 @@ def api_join_live(req: JoinLiveSessionRequest):
                 "player_name": name,
                 "rejoined": True,
             }
-        cursor = conn.execute(
-            "INSERT INTO live_players (session_id, player_name, joined_at, last_seen) VALUES (?,?,?,?)",
-            (sess["id"], name, datetime.utcnow().isoformat(), datetime.utcnow().isoformat()),
-        )
-        conn.commit()
-        player_id = cursor.lastrowid
+        if USE_POSTGRES:
+            cursor = conn.execute(
+                "INSERT INTO live_players (session_id, player_name, joined_at, last_seen) VALUES (?,?,?,?) RETURNING id",
+                (sess["id"], name, datetime.utcnow().isoformat(), datetime.utcnow().isoformat()),
+            )
+            row = cursor.fetchone()
+            player_id = row["id"]
+            conn.commit()
+        else:
+            cursor = conn.execute(
+                "INSERT INTO live_players (session_id, player_name, joined_at, last_seen) VALUES (?,?,?,?)",
+                (sess["id"], name, datetime.utcnow().isoformat(), datetime.utcnow().isoformat()),
+            )
+            conn.commit()
+            player_id = cursor.lastrowid
     return {
         "session_id": sess["id"],
         "player_id": player_id,
