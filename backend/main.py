@@ -56,6 +56,26 @@ client = AzureOpenAI(
 )
 DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT")
 
+# Separate Azure OpenAI client for Whisper (deployed in a different region)
+WHISPER_API_KEY = os.getenv("AZURE_WHISPER_API_KEY", "").strip()
+WHISPER_ENDPOINT = os.getenv("AZURE_WHISPER_ENDPOINT", "").strip()
+WHISPER_DEPLOYMENT = os.getenv("AZURE_WHISPER_DEPLOYMENT", "whisper").strip()
+WHISPER_API_VERSION = os.getenv("AZURE_WHISPER_API_VERSION", "2024-10-21").strip()
+
+whisper_client = None
+if WHISPER_API_KEY and WHISPER_ENDPOINT:
+    try:
+        whisper_client = AzureOpenAI(
+            api_key=WHISPER_API_KEY,
+            api_version=WHISPER_API_VERSION,
+            azure_endpoint=WHISPER_ENDPOINT,
+        )
+        print(f"[Whisper] Enabled — deployment: {WHISPER_DEPLOYMENT}")
+    except Exception as e:
+        print(f"[Whisper] Failed to initialize client: {e}")
+else:
+    print("[Whisper] Disabled — AZURE_WHISPER_API_KEY / AZURE_WHISPER_ENDPOINT not set")
+
 # ---------------------------------------------------------------------------
 # Database abstraction layer — supports both SQLite (local) and Postgres (prod)
 # ---------------------------------------------------------------------------
@@ -1166,6 +1186,94 @@ async def upload_pdf(file: UploadFile = File(...)):
     if not text.strip():
         raise HTTPException(status_code=400, detail="PDF contains no readable text.")
     return {"text": text, "char_count": len(text), "filename": file.filename}
+
+
+# ---------------------------------------------------------------------------
+# Audio / Video transcription via Azure OpenAI Whisper
+# ---------------------------------------------------------------------------
+ALLOWED_AUDIO_EXTS = (".mp3", ".mp4", ".mpeg", ".mpga", ".m4a", ".wav", ".webm", ".ogg", ".mov")
+MAX_AUDIO_BYTES = 25 * 1024 * 1024  # Whisper's hard limit is 25 MB
+
+
+@app.post("/api/transcribe-audio")
+async def transcribe_audio(request: Request, file: UploadFile = File(...)):
+    # Rate-limit like other AI endpoints (uses the quiz limiter — same monthly budget)
+    check_quiz_rate_limit(request)
+
+    if whisper_client is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Audio transcription is not configured on this server. "
+                   "Set AZURE_WHISPER_API_KEY and AZURE_WHISPER_ENDPOINT in .env."
+        )
+
+    # Validate filename & extension
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="No filename provided.")
+    filename_lower = file.filename.lower()
+    ext = "." + filename_lower.rsplit(".", 1)[-1] if "." in filename_lower else ""
+    if ext not in ALLOWED_AUDIO_EXTS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported format '{ext}'. Allowed: {', '.join(ALLOWED_AUDIO_EXTS)}"
+        )
+
+    # Read + size check
+    contents = await file.read()
+    size = len(contents)
+    if size == 0:
+        raise HTTPException(status_code=400, detail="Empty file.")
+    if size > MAX_AUDIO_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large ({size / 1024 / 1024:.1f} MB). Maximum is 25 MB. "
+                   "For longer recordings, split the file or use a lower bitrate."
+        )
+
+    # Send to Whisper.
+    # The Azure OpenAI SDK expects a file-like object with a name attribute
+    # (used to infer the MIME type). Wrap the bytes in a small helper.
+    import io
+    audio_stream = io.BytesIO(contents)
+    audio_stream.name = file.filename  # Whisper client uses this to detect format
+
+    try:
+        result = whisper_client.audio.transcriptions.create(
+            file=audio_stream,
+            model=WHISPER_DEPLOYMENT,
+            response_format="text",  # Returns a plain string
+        )
+    except Exception as e:
+        # Log for debugging but return a user-friendly message
+        print(f"[Whisper] Transcription failed for '{file.filename}' ({size} bytes): {e}")
+        # Common causes: wrong region, wrong deployment name, expired key, unsupported audio
+        raise HTTPException(
+            status_code=502,
+            detail=f"Transcription service failed: {str(e)[:200]}"
+        )
+
+    # Whisper with response_format="text" returns the raw transcript as a string
+    text = (result if isinstance(result, str) else str(result)).strip()
+
+    if not text:
+        raise HTTPException(
+            status_code=400,
+            detail="No speech detected in the recording. Please try a clearer audio file."
+        )
+
+    # Rough duration estimate: assume ~150 words/min average speech pace
+    # (Not accurate but useful for UI feedback.)
+    word_count = len(text.split())
+    duration_estimate_sec = int(word_count / 150 * 60)
+
+    return {
+        "text": text,
+        "char_count": len(text),
+        "word_count": word_count,
+        "duration_estimate_sec": duration_estimate_sec,
+        "filename": file.filename,
+        "file_size_bytes": size,
+    }
 
 
 @app.post("/api/youtube")

@@ -1,14 +1,14 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import {
   Upload, FileText, Sparkles, CheckCircle2, XCircle, RotateCcw, BookOpen,
   Loader2, Video as Youtube, Clock, Plus, X, Lightbulb, ArrowRight, ArrowLeft,
-  Layers, ScrollText, Brain, Edit3, Wand2,
+  Layers, ScrollText, Brain, Edit3, Wand2, Mic, Square, Play, Pause, Trash2,
 } from 'lucide-react'
 import ManualQuizBuilder from '../components/ManualQuizBuilder'
 import {
   uploadPdf, generateQuiz, fetchYoutubeTranscript, pasteYoutubeTranscript,
   extractConcepts, generateFlashcardsFromText, generateNotes, listQuizzes,
-  generateFlashcardsFromQuiz,
+  generateFlashcardsFromQuiz, transcribeAudio,
 } from '../api'
 import ChatWidget from '../ChatWidget'
 
@@ -448,6 +448,7 @@ function InputStep({
 function SourceIcon({ kind }) {
   if (kind === 'youtube') return <Youtube size={16} />
   if (kind === 'pdf') return <FileText size={16} />
+  if (kind === 'audio') return <Mic size={16} />
   return <Sparkles size={16} />
 }
 
@@ -552,6 +553,30 @@ function SourceAdder({ adderType, setAdderType, onAdd, onCancel, setError }) {
         </button>
         <button className={`tab ${adderType === 'youtube' ? 'active' : ''}`} onClick={() => setAdderType('youtube')}>
           <Youtube size={14} /> YouTube
+        </button>
+        <button
+          className={`tab ${adderType === 'audio' ? 'active' : ''}`}
+          onClick={() => setAdderType('audio')}
+          style={{ position: 'relative' }}
+        >
+          <Mic size={14} /> Audio
+          <span
+            style={{
+              position: 'absolute',
+              top: '-6px',
+              right: '-4px',
+              background: 'linear-gradient(135deg, #7c3aed, #a855f7)',
+              color: 'white',
+              fontSize: '0.6rem',
+              fontWeight: 700,
+              padding: '2px 6px',
+              borderRadius: '10px',
+              letterSpacing: '0.5px',
+              boxShadow: '0 2px 8px rgba(124, 58, 237, 0.4)',
+            }}
+          >
+            NEW
+          </span>
         </button>
       </div>
 
@@ -660,7 +685,335 @@ function SourceAdder({ adderType, setAdderType, onAdd, onCancel, setError }) {
           )}
         </>
       )}
+
+      {adderType === 'audio' && (
+        <AudioAdder onAdd={onAdd} setError={setError} onCancel={onCancel} />
+      )}
     </div>
+  )
+}
+
+/* ============================================================
+   AUDIO / VIDEO SOURCE (Whisper transcription)
+   Two modes: file upload OR live browser recording.
+   ============================================================ */
+function AudioAdder({ onAdd, setError, onCancel }) {
+  const [mode, setMode] = useState('upload')  // 'upload' | 'record'
+  const [busy, setBusy] = useState(false)
+
+  // Recording state
+  const [isRecording, setIsRecording] = useState(false)
+  const [recordedBlob, setRecordedBlob] = useState(null)
+  const [recordedUrl, setRecordedUrl] = useState(null)
+  const [elapsedSec, setElapsedSec] = useState(0)
+  const mediaRecorderRef = useRef(null)
+  const chunksRef = useRef([])
+  const timerRef = useRef(null)
+  const streamRef = useRef(null)
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (timerRef.current) clearInterval(timerRef.current)
+      if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop())
+      if (recordedUrl) URL.revokeObjectURL(recordedUrl)
+    }
+  }, [recordedUrl])
+
+  const formatDuration = (sec) => {
+    const m = Math.floor(sec / 60)
+    const s = sec % 60
+    return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+  }
+
+  const submitAudioFile = async (file, filename = null) => {
+    setError('')
+    setBusy(true)
+    try {
+      const data = await transcribeAudio(file, filename)
+      const nameForLabel = filename || file.name || 'Recording'
+      const cleanLabel = nameForLabel.replace(/\.[^/.]+$/, '')  // strip extension
+      onAdd({
+        id: newSourceId(),
+        kind: 'audio',
+        label: cleanLabel,
+        text: data.text,
+      })
+      // Reset recording state after successful add
+      setRecordedBlob(null)
+      if (recordedUrl) {
+        URL.revokeObjectURL(recordedUrl)
+        setRecordedUrl(null)
+      }
+      setElapsedSec(0)
+    } catch (err) {
+      const detail = err.response?.data?.detail
+      setError(detail || 'Could not transcribe audio. Check your connection and try again.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  // Upload tab handler
+  const handleFileUpload = (e) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    // Client-side size check (25 MB)
+    if (file.size > 25 * 1024 * 1024) {
+      setError('File is too large. Maximum size is 25 MB.')
+      return
+    }
+    submitAudioFile(file)
+    // Reset input so the same file can be re-selected
+    e.target.value = ''
+  }
+
+  // Record tab handlers
+  const startRecording = async () => {
+    setError('')
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      streamRef.current = stream
+      // Pick a supported mime type — webm is widely supported, mp4 works on Safari
+      let mimeType = 'audio/webm'
+      if (!MediaRecorder.isTypeSupported(mimeType)) {
+        mimeType = 'audio/mp4'
+      }
+      const recorder = new MediaRecorder(stream, { mimeType })
+      mediaRecorderRef.current = recorder
+      chunksRef.current = []
+
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) chunksRef.current.push(e.data)
+      }
+      recorder.onstop = () => {
+        const blob = new Blob(chunksRef.current, { type: mimeType })
+        setRecordedBlob(blob)
+        const url = URL.createObjectURL(blob)
+        setRecordedUrl(url)
+        // Release the microphone
+        if (streamRef.current) {
+          streamRef.current.getTracks().forEach(t => t.stop())
+          streamRef.current = null
+        }
+      }
+
+      recorder.start()
+      setIsRecording(true)
+      setElapsedSec(0)
+      timerRef.current = setInterval(() => {
+        setElapsedSec(prev => prev + 1)
+      }, 1000)
+    } catch (err) {
+      if (err.name === 'NotAllowedError') {
+        setError('Microphone permission denied. Enable it in your browser settings and try again.')
+      } else if (err.name === 'NotFoundError') {
+        setError('No microphone found. Connect one and try again.')
+      } else {
+        setError(`Could not start recording: ${err.message}`)
+      }
+    }
+  }
+
+  const stopRecording = () => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      mediaRecorderRef.current.stop()
+    }
+    if (timerRef.current) {
+      clearInterval(timerRef.current)
+      timerRef.current = null
+    }
+    setIsRecording(false)
+  }
+
+  const discardRecording = () => {
+    if (recordedUrl) {
+      URL.revokeObjectURL(recordedUrl)
+      setRecordedUrl(null)
+    }
+    setRecordedBlob(null)
+    setElapsedSec(0)
+  }
+
+  const useRecording = () => {
+    if (!recordedBlob) return
+    // Size check (should be under 25 MB for typical recording)
+    if (recordedBlob.size > 25 * 1024 * 1024) {
+      setError('Recording is too large (over 25 MB). Try a shorter recording.')
+      return
+    }
+    // Filename based on mime type
+    const ext = recordedBlob.type.includes('mp4') ? 'mp4' : 'webm'
+    const filename = `recording-${Date.now()}.${ext}`
+    submitAudioFile(recordedBlob, filename)
+  }
+
+  return (
+    <>
+      {/* Upload / Record sub-tabs */}
+      <div className="tabs" style={{ marginBottom: '0.75rem' }}>
+        <button
+          className={`tab ${mode === 'upload' ? 'active' : ''}`}
+          onClick={() => setMode('upload')}
+          disabled={busy || isRecording}
+        >
+          <Upload size={14} /> Upload file
+        </button>
+        <button
+          className={`tab ${mode === 'record' ? 'active' : ''}`}
+          onClick={() => setMode('record')}
+          disabled={busy}
+        >
+          <Mic size={14} /> Record now
+        </button>
+      </div>
+
+      {mode === 'upload' && (
+        <>
+          <label className="upload-zone">
+            <input
+              type="file"
+              accept="audio/*,video/*,.mp3,.mp4,.m4a,.wav,.webm,.ogg,.mov"
+              onChange={handleFileUpload}
+              disabled={busy}
+            />
+            <Upload size={32} className="icon" />
+            {busy ? (
+              <div>
+                <Loader2 size={16} className="spinner" /> Transcribing...
+                <div className="text-info" style={{ marginTop: '0.5rem' }}>
+                  This can take 10-60 seconds depending on the length of your audio.
+                </div>
+              </div>
+            ) : (
+              <>
+                <div><strong>Click to upload audio or video</strong></div>
+                <div className="text-info">
+                  mp3, mp4, m4a, wav, webm, ogg, mov · Maximum 25 MB
+                </div>
+              </>
+            )}
+          </label>
+        </>
+      )}
+
+      {mode === 'record' && (
+        <div style={{
+          padding: '1.5rem',
+          background: 'var(--surface-2, #1a1625)',
+          border: '1px solid var(--border, #2a2438)',
+          borderRadius: '12px',
+          textAlign: 'center',
+        }}>
+          {/* Recording UI */}
+          {!isRecording && !recordedBlob && !busy && (
+            <>
+              <button
+                onClick={startRecording}
+                style={{
+                  width: '80px',
+                  height: '80px',
+                  borderRadius: '50%',
+                  border: 'none',
+                  background: 'linear-gradient(135deg, #ef4444, #dc2626)',
+                  color: 'white',
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  margin: '0 auto 1rem',
+                  boxShadow: '0 4px 20px rgba(239, 68, 68, 0.4)',
+                  transition: 'transform 0.2s',
+                }}
+                onMouseEnter={(e) => e.currentTarget.style.transform = 'scale(1.05)'}
+                onMouseLeave={(e) => e.currentTarget.style.transform = 'scale(1)'}
+              >
+                <Mic size={36} />
+              </button>
+              <div><strong>Click to start recording</strong></div>
+              <div className="text-info" style={{ marginTop: '0.5rem' }}>
+                Your browser will ask for microphone permission.
+                <br/>Maximum 25 MB (~15 min at typical quality).
+              </div>
+            </>
+          )}
+
+          {/* Active recording */}
+          {isRecording && (
+            <>
+              <div style={{
+                width: '80px',
+                height: '80px',
+                borderRadius: '50%',
+                background: 'linear-gradient(135deg, #ef4444, #dc2626)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                margin: '0 auto 1rem',
+                animation: 'pulse 1.5s ease-in-out infinite',
+                boxShadow: '0 0 0 rgba(239, 68, 68, 0.7)',
+              }}>
+                <Mic size={36} color="white" />
+              </div>
+              <div style={{
+                fontSize: '2rem',
+                fontFamily: 'JetBrains Mono, monospace',
+                fontWeight: 700,
+                color: '#ef4444',
+                marginBottom: '1rem',
+              }}>
+                {formatDuration(elapsedSec)}
+              </div>
+              <button className="btn" onClick={stopRecording} style={{ background: '#374151' }}>
+                <Square size={16} /> Stop
+              </button>
+              <style>{`
+                @keyframes pulse {
+                  0%, 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7); }
+                  50% { box-shadow: 0 0 0 20px rgba(239, 68, 68, 0); }
+                }
+              `}</style>
+            </>
+          )}
+
+          {/* Preview + confirm */}
+          {recordedBlob && !busy && (
+            <>
+              <div style={{ marginBottom: '1rem' }}>
+                <CheckCircle2 size={40} color="#10b981" style={{ marginBottom: '0.5rem' }} />
+                <div><strong>Recording ready ({formatDuration(elapsedSec)})</strong></div>
+              </div>
+              <audio src={recordedUrl} controls style={{ width: '100%', marginBottom: '1rem' }} />
+              <div className="button-row" style={{ justifyContent: 'center' }}>
+                <button className="btn" onClick={useRecording}>
+                  <Sparkles size={16} /> Transcribe
+                </button>
+                <button className="btn btn-secondary" onClick={discardRecording}>
+                  <Trash2 size={16} /> Discard
+                </button>
+              </div>
+            </>
+          )}
+
+          {/* Transcribing */}
+          {busy && (
+            <>
+              <Loader2 size={40} className="spinner" style={{ marginBottom: '0.5rem' }} />
+              <div><strong>Transcribing your recording...</strong></div>
+              <div className="text-info" style={{ marginTop: '0.5rem' }}>
+                This can take 10-60 seconds depending on length.
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {onCancel && !isRecording && (
+        <div className="button-row" style={{ marginTop: '0.75rem' }}>
+          <button className="btn btn-secondary" onClick={onCancel} disabled={busy}>Cancel</button>
+        </div>
+      )}
+    </>
   )
 }
 

@@ -104,6 +104,24 @@ export const uploadPdf = async (file) => {
   return data
 }
 
+// Audio / video transcription via Azure Whisper.
+// Accepts a File (from <input type="file">) or a Blob (from MediaRecorder).
+// If a Blob is passed, provide a filename (with extension) so the backend
+// can detect the format.
+export const transcribeAudio = async (file, filename = null) => {
+  const formData = new FormData()
+  if (filename) {
+    formData.append('file', file, filename)
+  } else {
+    formData.append('file', file)
+  }
+  const { data } = await api.post('/api/transcribe-audio', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 180000, // Transcription can take up to 3 min for long audio
+  })
+  return data
+}
+
 export const fetchYoutubeTranscript = async (url) => {
   const { data } = await api.post('/api/youtube', { url })
   return data
