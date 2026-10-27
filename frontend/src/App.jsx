@@ -20,6 +20,7 @@ import LivePlay from './pages/live/LivePlay'
 import Start from './pages/Start'
 import MyProgress from './pages/MyProgress'
 import AdminDashboard from './pages/AdminDashboard'
+import AdminUser from './pages/AdminUser'
 
 export default function App() {
   const location = useLocation()
@@ -50,6 +51,7 @@ export default function App() {
 
         {/* Administration */}
         <Route path="/admin" element={<RequireAuth role="admin"><AdminDashboard /></RequireAuth>} />
+        <Route path="/admin/users/:userId" element={<RequireAuth role="admin"><AdminUser /></RequireAuth>} />
 
         {/* Student routes (open) */}
         <Route path="/join" element={<JoinClass />} />

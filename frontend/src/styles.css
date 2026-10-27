@@ -4374,3 +4374,36 @@ html, body {
   .source-chip-remove { padding: 0.45rem; }
   .chat-close { padding: 0.55rem; }
 }
+
+/* ---------- Administration ---------- */
+.admin-tabs { flex-wrap: wrap; }
+.admin-tabs .tab { flex: 1 1 auto; white-space: nowrap; }
+.admin-toolbar { display: flex; gap: 0.6rem; flex-wrap: wrap; margin-bottom: 1rem; }
+.admin-toolbar .input { flex: 1 1 220px; width: auto; }
+.admin-toolbar .select { width: auto; flex: 0 0 auto; }
+.admin-user-row { cursor: pointer; }
+.admin-user-row:hover .quiz-row-title { color: var(--accent-light); }
+.admin-badges { display: inline-flex; gap: 0.35rem; margin-left: 0.5rem; vertical-align: middle; }
+.admin-log { display: flex; flex-direction: column; gap: 0.5rem; }
+.admin-log-row { display: grid; grid-template-columns: 150px 1fr; gap: 0.75rem; padding: 0.7rem 0.9rem;
+  border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); font-size: 0.88rem; }
+.admin-log-time { color: var(--text-fade); font-size: 0.8rem; font-family: var(--font-mono, monospace); }
+.admin-log-main strong { font-weight: 600; }
+.admin-log-details { color: var(--text-dim); font-size: 0.82rem; margin-top: 0.15rem; }
+.admin-maint-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 1rem; margin-bottom: 1rem; }
+.admin-maint-grid .card { margin-bottom: 0; display: flex; flex-direction: column; gap: 0.6rem; }
+.admin-maint-grid .card h3 { font-size: 1rem; margin: 0; }
+.admin-maint-grid .card p { color: var(--text-dim); font-size: 0.86rem; margin: 0; flex: 1; }
+.admin-maint-count { font-size: 1.6rem; font-weight: 700; }
+.admin-table { width: 100%; border-collapse: collapse; font-size: 0.86rem; }
+.admin-table td, .admin-table th { padding: 0.4rem 0.6rem; border-bottom: 1px solid var(--border); text-align: left; }
+.admin-table td:last-child, .admin-table th:last-child { text-align: right; font-variant-numeric: tabular-nums; }
+.admin-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 0.75rem; }
+.admin-fact-label { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-fade); }
+.admin-fact-value { font-weight: 600; margin-top: 0.15rem; word-break: break-word; }
+.danger-zone { border-color: var(--error) !important; }
+.btn-danger { background: var(--error) !important; color: #fff !important; border-color: var(--error) !important; }
+.btn-danger:hover { filter: brightness(0.95); }
+@media (max-width: 640px) {
+  .admin-log-row { grid-template-columns: 1fr; gap: 0.25rem; }
+}

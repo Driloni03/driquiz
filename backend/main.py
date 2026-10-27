@@ -590,6 +590,30 @@ def init_db():
         """)
         conn.commit()
 
+        # Administration: an account can be blocked (it can no longer sign in)
+        # and every action of an administrator is written to admin_actions.
+        # target_id is not a foreign key on purpose: the target may be a user,
+        # a question set, a note... and the log must survive its deletion,
+        # which is why a readable target_label is stored as well.
+        if not _column_exists(conn, "users", "blocked_at"):
+            _safe_migrate(conn, "ALTER TABLE users ADD COLUMN blocked_at TEXT")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS admin_actions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                admin_id TEXT,
+                admin_name TEXT NOT NULL,
+                action TEXT NOT NULL,
+                target_type TEXT NOT NULL,
+                target_id TEXT,
+                target_label TEXT,
+                details TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (admin_id) REFERENCES users(id) ON DELETE SET NULL
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_admin_actions_created ON admin_actions(created_at DESC)")
+        conn.commit()
+
         # Columns that were added with ALTER TABLE earlier had no foreign key.
         # PostgreSQL can add the constraint afterwards; NOT VALID means it is
         # enforced for new rows without failing on old orphaned rows.
@@ -731,7 +755,7 @@ def get_user_from_token(token: str) -> Optional[dict]:
         row = conn.execute(
             """SELECT u.id, u.email, u.name, u.role FROM sessions s
                JOIN users u ON u.id = s.user_id
-               WHERE s.token = ? AND s.expires_at > ?""",
+               WHERE s.token = ? AND s.expires_at > ? AND u.blocked_at IS NULL""",
             (token, datetime.utcnow().isoformat()),
         ).fetchone()
         return dict(row) if row else None
@@ -3122,13 +3146,15 @@ def api_signin(req: SignInRequest):
     email = req.email.strip().lower()
     with get_db() as conn:
         row = conn.execute(
-            "SELECT id, email, password_hash, name, role FROM users WHERE email = ?",
+            "SELECT id, email, password_hash, name, role, blocked_at FROM users WHERE email = ?",
             (email,),
         ).fetchone()
     if not row:
         raise HTTPException(status_code=400, detail="No account with that email.")
     if not verify_password(req.password, row["password_hash"]):
         raise HTTPException(status_code=400, detail="Wrong password.")
+    if row["blocked_at"]:
+        raise HTTPException(status_code=403, detail="This account has been blocked by an administrator.")
     # Silently upgrade legacy SHA-256 hashes to bcrypt on successful login
     rehash_password_if_needed(row["id"], req.password, row["password_hash"])
     token = create_session(row["id"])
@@ -3763,6 +3789,7 @@ def api_admin_stats(admin: dict = Depends(require_admin)):
             "assignments": count("SELECT COUNT(*) c FROM assignments"),
             "submissions": count("SELECT COUNT(*) c FROM leaderboard"),
             "guest_items": count("SELECT COUNT(*) c FROM quizzes WHERE user_id IS NULL"),
+            "blocked": count("SELECT COUNT(*) c FROM users WHERE blocked_at IS NOT NULL"),
         }
 
 
@@ -3770,9 +3797,12 @@ def api_admin_stats(admin: dict = Depends(require_admin)):
 def api_admin_users(admin: dict = Depends(require_admin)):
     with get_db() as conn:
         rows = conn.execute(
-            """SELECT u.id, u.email, u.name, u.role, u.created_at,
+            """SELECT u.id, u.email, u.name, u.role, u.created_at, u.blocked_at,
                       (SELECT COUNT(*) FROM quizzes q WHERE q.user_id = u.id) AS quizzes,
-                      (SELECT COUNT(*) FROM classes c WHERE c.teacher_id = u.id) AS classes
+                      (SELECT COUNT(*) FROM flashcard_sets f WHERE f.user_id = u.id) AS flashcard_sets,
+                      (SELECT COUNT(*) FROM study_notes n WHERE n.user_id = u.id) AS notes,
+                      (SELECT COUNT(*) FROM classes c WHERE c.teacher_id = u.id) AS classes,
+                      (SELECT MAX(s.created_at) FROM sessions s WHERE s.user_id = u.id) AS last_sign_in
                FROM users u ORDER BY u.created_at DESC LIMIT 500"""
         ).fetchall()
     return {"users": [dict(r) for r in rows]}
@@ -3783,11 +3813,13 @@ def api_admin_set_role(user_id: str, req: UpdateRoleRequest, admin: dict = Depen
     if user_id == admin["id"] and req.role != "admin":
         raise HTTPException(status_code=400, detail="You can't remove your own admin role.")
     with get_db() as conn:
-        row = conn.execute("SELECT 1 FROM users WHERE id = ?", (user_id,)).fetchone()
+        row = conn.execute("SELECT name, email, role FROM users WHERE id = ?", (user_id,)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="User not found.")
         conn.execute("UPDATE users SET role = ? WHERE id = ?", (req.role, user_id))
         conn.commit()
+    if row["role"] != req.role:
+        log_admin_action(admin, "change_role", "user", user_id, _user_label(row), f"{row['role']} -> {req.role}")
     return {"updated": user_id, "role": req.role}
 
 
@@ -3842,24 +3874,284 @@ def delete_quiz_everywhere(quiz_id: str):
 
 @app.delete("/api/admin/quizzes/{quiz_id}")
 def api_admin_delete_quiz(quiz_id: str, admin: dict = Depends(require_admin)):
-    if not load_quiz(quiz_id):
+    quiz = load_quiz(quiz_id)
+    if not quiz:
         raise HTTPException(status_code=404, detail="Quiz not found.")
     delete_quiz_everywhere(quiz_id)
+    log_admin_action(admin, "delete_content", "quiz", quiz_id, quiz["title"])
     return {"deleted": quiz_id}
 
 
 @app.delete("/api/admin/flashcards/{set_id}")
 def api_admin_delete_flashcards(set_id: str, admin: dict = Depends(require_admin)):
     with get_db() as conn:
+        row = conn.execute("SELECT title FROM flashcard_sets WHERE id = ?", (set_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Flashcard set not found.")
         conn.execute("DELETE FROM flashcard_progress WHERE set_id = ?", (set_id,))
         conn.execute("DELETE FROM flashcard_sets WHERE id = ?", (set_id,))
         conn.commit()
+    log_admin_action(admin, "delete_content", "flashcard_set", set_id, row["title"])
     return {"deleted": set_id}
 
 
 @app.delete("/api/admin/notes/{note_id}")
 def api_admin_delete_note(note_id: str, admin: dict = Depends(require_admin)):
     with get_db() as conn:
+        row = conn.execute("SELECT title FROM study_notes WHERE id = ?", (note_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Note not found.")
         conn.execute("DELETE FROM study_notes WHERE id = ?", (note_id,))
         conn.commit()
+    log_admin_action(admin, "delete_content", "note", note_id, row["title"])
     return {"deleted": note_id}
+
+
+# ---------------------------------------------------------------------------
+# Audit log, account management and maintenance
+# ---------------------------------------------------------------------------
+def _user_label(row) -> str:
+    return f"{row['name']} <{row['email']}>"
+
+
+def log_admin_action(admin: dict, action: str, target_type: str, target_id: Optional[str],
+                     target_label: Optional[str] = None, details: Optional[str] = None):
+    """Write one row to admin_actions. A failure here must never undo the
+    action itself, so errors are only printed."""
+    try:
+        with get_db() as conn:
+            conn.execute(
+                """INSERT INTO admin_actions (admin_id, admin_name, action, target_type, target_id,
+                                              target_label, details, created_at)
+                   VALUES (?,?,?,?,?,?,?,?)""",
+                (admin["id"], admin.get("name") or admin.get("email", "admin"), action, target_type,
+                 target_id, (target_label or "")[:200], (details or None), datetime.utcnow().isoformat()),
+            )
+            conn.commit()
+    except Exception as e:
+        print(f"[Admin] Could not write audit log: {e}")
+
+
+def _get_user_row(conn, user_id: str):
+    row = conn.execute(
+        "SELECT id, name, email, role, created_at, blocked_at FROM users WHERE id = ?", (user_id,)
+    ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="User not found.")
+    return row
+
+
+@app.get("/api/admin/users/{user_id}")
+def api_admin_user_detail(user_id: str, admin: dict = Depends(require_admin)):
+    now = datetime.utcnow().isoformat()
+    with get_db() as conn:
+        u = dict(_get_user_row(conn, user_id))
+        rows = lambda sql: [dict(r) for r in conn.execute(sql, (user_id,)).fetchall()]
+        u["quizzes"] = rows("SELECT id, title, created_at, source_type FROM quizzes WHERE user_id = ? ORDER BY created_at DESC")
+        u["flashcard_sets"] = rows("SELECT id, title, created_at FROM flashcard_sets WHERE user_id = ? ORDER BY created_at DESC")
+        u["notes"] = rows("SELECT id, title, created_at FROM study_notes WHERE user_id = ? ORDER BY created_at DESC")
+        u["attempts"] = rows(
+            """SELECT l.quiz_id, q.title AS quiz_title, l.score, l.total, l.percentage, l.created_at,
+                      c.name AS class_name
+               FROM leaderboard l LEFT JOIN quizzes q ON q.id = l.quiz_id
+               LEFT JOIN classes c ON c.id = l.class_id
+               WHERE l.user_id = ? ORDER BY l.created_at DESC LIMIT 50""")
+        u["classes_taught"] = rows(
+            """SELECT c.id, c.name, c.code, c.created_at,
+                      (SELECT COUNT(*) FROM class_memberships m WHERE m.class_id = c.id) AS students
+               FROM classes c WHERE c.teacher_id = ? ORDER BY c.created_at DESC""")
+        u["memberships"] = rows(
+            """SELECT c.id, c.name, m.joined_at FROM class_memberships m
+               JOIN classes c ON c.id = m.class_id WHERE m.user_id = ? ORDER BY m.joined_at DESC""")
+        u["active_sessions"] = conn.execute(
+            "SELECT COUNT(*) c FROM sessions WHERE user_id = ? AND expires_at > ?", (user_id, now)
+        ).fetchone()["c"]
+        u["last_sign_in"] = conn.execute(
+            "SELECT MAX(created_at) m FROM sessions WHERE user_id = ?", (user_id,)
+        ).fetchone()["m"]
+        u["actions"] = [dict(r) for r in conn.execute(
+            """SELECT admin_name, action, details, created_at FROM admin_actions
+               WHERE target_type = 'user' AND target_id = ? ORDER BY created_at DESC LIMIT 20""",
+            (user_id,)).fetchall()]
+    return u
+
+
+@app.post("/api/admin/users/{user_id}/block")
+def api_admin_block_user(user_id: str, admin: dict = Depends(require_admin)):
+    if user_id == admin["id"]:
+        raise HTTPException(status_code=400, detail="You can't block your own account.")
+    with get_db() as conn:
+        row = _get_user_row(conn, user_id)
+        if row["blocked_at"]:
+            return {"blocked": user_id, "blocked_at": row["blocked_at"]}
+        now = datetime.utcnow().isoformat()
+        conn.execute("UPDATE users SET blocked_at = ? WHERE id = ?", (now, user_id))
+        # Signing the account out everywhere: its tokens stop working at once.
+        ended = conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,)).rowcount
+        conn.commit()
+    log_admin_action(admin, "block_user", "user", user_id, _user_label(row), f"{ended} session(s) ended")
+    return {"blocked": user_id, "blocked_at": now}
+
+
+@app.post("/api/admin/users/{user_id}/unblock")
+def api_admin_unblock_user(user_id: str, admin: dict = Depends(require_admin)):
+    with get_db() as conn:
+        row = _get_user_row(conn, user_id)
+        conn.execute("UPDATE users SET blocked_at = NULL WHERE id = ?", (user_id,))
+        conn.commit()
+    if row["blocked_at"]:
+        log_admin_action(admin, "unblock_user", "user", user_id, _user_label(row))
+    return {"unblocked": user_id}
+
+
+def delete_user_account(user_id: str, delete_content: bool = False) -> dict:
+    """Remove an account. Classes and live sessions it ran are removed with it;
+    its study material either stays without an owner (like guest material)
+    or, with delete_content, is deleted as well. Every step is explicit, so
+    the result is the same in PostgreSQL and in SQLite."""
+    with get_db() as conn:
+        class_ids = [r["id"] for r in conn.execute("SELECT id FROM classes WHERE teacher_id = ?", (user_id,)).fetchall()]
+        quiz_ids = [r["id"] for r in conn.execute("SELECT id FROM quizzes WHERE user_id = ?", (user_id,)).fetchall()]
+        set_ids = [r["id"] for r in conn.execute("SELECT id FROM flashcard_sets WHERE user_id = ?", (user_id,)).fetchall()]
+    for cid in class_ids:
+        delete_class(cid)
+    if delete_content:
+        for qid in quiz_ids:
+            delete_quiz_everywhere(qid)
+    with get_db() as conn:
+        live_ids = [r["id"] for r in conn.execute("SELECT id FROM live_sessions WHERE teacher_id = ?", (user_id,)).fetchall()]
+        for sid in live_ids:
+            conn.execute("DELETE FROM live_answers WHERE session_id = ?", (sid,))
+            conn.execute("DELETE FROM live_players WHERE session_id = ?", (sid,))
+            conn.execute("DELETE FROM live_sessions WHERE id = ?", (sid,))
+        if delete_content:
+            for fid in set_ids:
+                conn.execute("DELETE FROM flashcard_progress WHERE set_id = ?", (fid,))
+                conn.execute("DELETE FROM flashcard_sets WHERE id = ?", (fid,))
+            notes = conn.execute("DELETE FROM study_notes WHERE user_id = ?", (user_id,)).rowcount
+        else:
+            notes = 0
+            for table in ("quizzes", "flashcard_sets", "study_notes"):
+                conn.execute(f"UPDATE {table} SET user_id = NULL WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM flashcard_progress WHERE user_id = ?", (user_id,))
+        conn.execute("UPDATE leaderboard SET user_id = NULL WHERE user_id = ?", (user_id,))
+        conn.execute("UPDATE class_memberships SET user_id = NULL WHERE user_id = ?", (user_id,))
+        conn.execute("UPDATE class_announcements SET author_id = NULL WHERE author_id = ?", (user_id,))
+        conn.execute("UPDATE admin_actions SET admin_id = NULL WHERE admin_id = ?", (user_id,))
+        conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+        conn.commit()
+    return {"classes": len(class_ids), "live_sessions": len(live_ids),
+            "quizzes": len(quiz_ids), "flashcard_sets": len(set_ids), "notes": notes,
+            "content_deleted": delete_content}
+
+
+@app.delete("/api/admin/users/{user_id}")
+def api_admin_delete_user(user_id: str, delete_content: bool = False, admin: dict = Depends(require_admin)):
+    if user_id == admin["id"]:
+        raise HTTPException(status_code=400, detail="You can't delete your own account.")
+    with get_db() as conn:
+        row = _get_user_row(conn, user_id)
+    summary = delete_user_account(user_id, delete_content)
+    details = (f"role {row['role']}; {summary['classes']} class(es) removed; material "
+               + ("deleted" if delete_content else "kept without owner"))
+    log_admin_action(admin, "delete_user", "user", user_id, _user_label(row), details)
+    return {"deleted": user_id, **summary}
+
+
+@app.get("/api/admin/audit")
+def api_admin_audit(limit: int = 200, admin: dict = Depends(require_admin)):
+    limit = max(1, min(limit, 500))
+    with get_db() as conn:
+        rows = conn.execute(
+            f"""SELECT id, admin_id, admin_name, action, target_type, target_id, target_label, details, created_at
+                FROM admin_actions ORDER BY created_at DESC, id DESC LIMIT {limit}"""
+        ).fetchall()
+    return {"actions": [dict(r) for r in rows]}
+
+
+# Maintenance --------------------------------------------------------------
+ADMIN_TABLES = ["users", "sessions", "quizzes", "flashcard_sets", "flashcard_progress", "study_notes",
+                "leaderboard", "classes", "class_memberships", "class_announcements", "assignments",
+                "assignment_responses", "live_sessions", "live_players", "live_answers", "admin_actions"]
+
+# Guest material that nobody claimed. A question set is kept if a class or a
+# live session uses it, or if a signed-in user has a result for it; a
+# flashcard set is kept if a signed-in user is reviewing it.
+_GUEST_QUIZ_WHERE = """user_id IS NULL AND created_at < ?
+    AND NOT EXISTS (SELECT 1 FROM assignments a WHERE a.quiz_id = quizzes.id)
+    AND NOT EXISTS (SELECT 1 FROM live_sessions ls WHERE ls.quiz_id = quizzes.id)
+    AND NOT EXISTS (SELECT 1 FROM leaderboard l WHERE l.quiz_id = quizzes.id AND l.user_id IS NOT NULL)"""
+_GUEST_SET_WHERE = """user_id IS NULL AND created_at < ?
+    AND NOT EXISTS (SELECT 1 FROM flashcard_progress p WHERE p.set_id = flashcard_sets.id)"""
+_GUEST_NOTE_WHERE = "user_id IS NULL AND created_at < ?"
+
+
+def _cutoff(days: int) -> str:
+    return (datetime.utcnow() - timedelta(days=days)).isoformat()
+
+
+def _database_size(conn) -> Optional[int]:
+    try:
+        if USE_POSTGRES:
+            return int(conn.execute("SELECT pg_database_size(current_database()) AS b").fetchone()["b"])
+        return os.path.getsize(DB_PATH)
+    except Exception:
+        return None
+
+
+@app.get("/api/admin/maintenance")
+def api_admin_maintenance(guest_days: int = 30, admin: dict = Depends(require_admin)):
+    guest_days = max(1, min(guest_days, 3650))
+    g = _cutoff(guest_days)
+    with get_db() as conn:
+        count = lambda sql, params=(): conn.execute(sql, params).fetchone()["c"]
+        return {
+            "guest_days": guest_days,
+            "guest": {
+                "quizzes": count(f"SELECT COUNT(*) c FROM quizzes WHERE {_GUEST_QUIZ_WHERE}", (g,)),
+                "flashcard_sets": count(f"SELECT COUNT(*) c FROM flashcard_sets WHERE {_GUEST_SET_WHERE}", (g,)),
+                "notes": count(f"SELECT COUNT(*) c FROM study_notes WHERE {_GUEST_NOTE_WHERE}", (g,)),
+            },
+            "old_responses": count("SELECT COUNT(*) c FROM assignment_responses WHERE submitted_at < ?", (_cutoff(90),)),
+            "expired_sessions": count("SELECT COUNT(*) c FROM sessions WHERE expires_at < ?", (datetime.utcnow().isoformat(),)),
+            "database_bytes": _database_size(conn),
+            "tables": {t: count(f"SELECT COUNT(*) c FROM {t}") for t in ADMIN_TABLES},
+        }
+
+
+class CleanupRequest(BaseModel):
+    task: Literal["guest_content", "old_responses", "expired_sessions"]
+    days: int = Field(30, ge=1, le=3650)
+
+
+@app.post("/api/admin/maintenance/cleanup")
+def api_admin_cleanup(req: CleanupRequest, admin: dict = Depends(require_admin)):
+    if req.task == "guest_content":
+        g = _cutoff(req.days)
+        with get_db() as conn:
+            quiz_ids = [r["id"] for r in conn.execute(f"SELECT id FROM quizzes WHERE {_GUEST_QUIZ_WHERE}", (g,)).fetchall()]
+            set_ids = [r["id"] for r in conn.execute(f"SELECT id FROM flashcard_sets WHERE {_GUEST_SET_WHERE}", (g,)).fetchall()]
+        for qid in quiz_ids:
+            delete_quiz_everywhere(qid)
+        with get_db() as conn:
+            for fid in set_ids:
+                conn.execute("DELETE FROM flashcard_sets WHERE id = ?", (fid,))
+            notes = conn.execute(f"DELETE FROM study_notes WHERE {_GUEST_NOTE_WHERE}", (g,)).rowcount
+            conn.commit()
+        result = {"quizzes": len(quiz_ids), "flashcard_sets": len(set_ids), "notes": notes}
+        details = f"older than {req.days} days: {len(quiz_ids)} sets, {len(set_ids)} flashcard sets, {notes} notes"
+    elif req.task == "old_responses":
+        with get_db() as conn:
+            n = conn.execute("DELETE FROM assignment_responses WHERE submitted_at < ?", (_cutoff(90),)).rowcount
+            conn.commit()
+        result = {"responses": n}
+        details = f"{n} answer rows older than 90 days"
+    else:
+        with get_db() as conn:
+            n = conn.execute("DELETE FROM sessions WHERE expires_at < ?", (datetime.utcnow().isoformat(),)).rowcount
+            conn.commit()
+        result = {"sessions": n}
+        details = f"{n} expired session(s)"
+    log_admin_action(admin, "cleanup", "maintenance", req.task, req.task.replace("_", " "), details)
+    return {"task": req.task, "deleted": result}

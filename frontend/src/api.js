@@ -140,6 +140,16 @@ export const adminContent = async () => (await api.get('/api/admin/content')).da
 export const adminDeleteQuiz = async (id) => (await api.delete(`/api/admin/quizzes/${id}`)).data
 export const adminDeleteFlashcards = async (id) => (await api.delete(`/api/admin/flashcards/${id}`)).data
 export const adminDeleteNote = async (id) => (await api.delete(`/api/admin/notes/${id}`)).data
+export const adminUserDetail = async (id) => (await api.get(`/api/admin/users/${id}`)).data
+export const adminBlockUser = async (id) => (await api.post(`/api/admin/users/${id}/block`)).data
+export const adminUnblockUser = async (id) => (await api.post(`/api/admin/users/${id}/unblock`)).data
+export const adminDeleteUser = async (id, deleteContent = false) =>
+  (await api.delete(`/api/admin/users/${id}`, { params: { delete_content: deleteContent } })).data
+export const adminAudit = async (limit = 200) => (await api.get('/api/admin/audit', { params: { limit } })).data.actions
+export const adminMaintenance = async (guestDays = 30) =>
+  (await api.get('/api/admin/maintenance', { params: { guest_days: guestDays } })).data
+export const adminCleanup = async (task, days = 30) =>
+  (await api.post('/api/admin/maintenance/cleanup', { task, days })).data
 
 // Live mode API
 export const createLiveSession = async (quiz_id) => {
