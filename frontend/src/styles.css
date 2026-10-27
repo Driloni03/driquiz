@@ -592,6 +592,13 @@ input[type="range"]::-webkit-slider-thumb:hover { transform: scale(1.15); }
   color: #86efac;
 }
 
+.alert-info {
+  background: rgba(124, 58, 237, 0.08);
+  border-color: rgba(124, 58, 237, 0.3);
+  color: var(--text);
+}
+.alert-info a { color: #a855f7; font-weight: 600; }
+
 /* ============================================================
    QUESTION CARDS
    ============================================================ */

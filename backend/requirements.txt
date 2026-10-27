@@ -8,5 +8,8 @@ PyMuPDF>=1.24.0
 python-multipart>=0.0.9
 youtube-transcript-api>=0.6.0
 
-# New for PostgreSQL support (Supabase)
+# PostgreSQL support (Supabase)
 psycopg2-binary>=2.9.9
+
+# Security hardening: bcrypt for password hashing
+bcrypt>=4.0.0

@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useParams, useNavigate, Link } from 'react-router-dom'
 import { GraduationCap, ArrowRight, Loader2, ArrowLeft } from 'lucide-react'
-import { joinClass } from '../api'
+import { joinClass, getAuthUser } from '../api'
 
 const STORAGE_STUDENT = 'driquiz_student_name'
 
@@ -9,7 +9,8 @@ export default function JoinClass() {
   const { code: codeParam } = useParams()
   const navigate = useNavigate()
   const [code, setCode] = useState(codeParam ? codeParam.toUpperCase() : '')
-  const [name, setName] = useState(localStorage.getItem(STORAGE_STUDENT) || '')
+  const user = getAuthUser()
+  const [name, setName] = useState(user?.name || localStorage.getItem(STORAGE_STUDENT) || '')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
 
@@ -65,6 +66,12 @@ export default function JoinClass() {
             maxLength={80}
           />
         </div>
+
+        <p className="text-info" style={{ fontSize: '0.8rem', marginTop: '-0.25rem', marginBottom: '0.9rem' }}>
+          {user
+            ? <>You are signed in, so this class and your results are saved to your account.</>
+            : <>Tip: <Link to={`/signin?mode=signup&role=student&next=${encodeURIComponent('/join' + (code ? '/' + code : ''))}`}>create a student account</Link> to keep your results on every device.</>}
+        </p>
 
         <button className="btn btn-block" onClick={submit} disabled={busy}>
           {busy ? <><Loader2 size={16} className="spinner" /> Joining...</> : <>Join class <ArrowRight size={16} /></>}

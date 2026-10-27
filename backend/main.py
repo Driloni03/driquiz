@@ -34,6 +34,52 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+
+# ---------------------------------------------------------------------------
+# Environment validation — fail fast with a clear message if anything critical
+# is missing, instead of crashing on the first request with a cryptic error.
+# ---------------------------------------------------------------------------
+def _validate_env():
+    """Validate required environment variables at startup."""
+    required = {
+        "AZURE_OPENAI_API_KEY": "Azure OpenAI API key (for gpt-4o-mini)",
+        "AZURE_OPENAI_ENDPOINT": "Azure OpenAI endpoint URL",
+        "AZURE_OPENAI_DEPLOYMENT": "Azure OpenAI deployment name",
+    }
+    missing = [(k, v) for k, v in required.items() if not os.getenv(k, "").strip()]
+    if missing:
+        print("=" * 60)
+        print("[STARTUP] ❌ Missing required environment variables:")
+        for k, desc in missing:
+            print(f"    {k}  — {desc}")
+        print()
+        print("Set them in backend/.env and restart the server.")
+        print("=" * 60)
+        raise SystemExit(1)
+
+    # Warn (don't fail) about optional but recommended vars
+    optional_warnings = []
+    if not os.getenv("DATABASE_URL", "").strip():
+        optional_warnings.append(
+            "DATABASE_URL not set — using SQLite (data will not persist across Render redeploys)"
+        )
+    if not (os.getenv("AZURE_WHISPER_API_KEY", "").strip()
+            and os.getenv("AZURE_WHISPER_ENDPOINT", "").strip()):
+        optional_warnings.append(
+            "AZURE_WHISPER_* not set — audio transcription will be disabled"
+        )
+    if not os.getenv("ALLOWED_ORIGINS", "").strip():
+        optional_warnings.append(
+            "ALLOWED_ORIGINS not set — using default localhost origins only"
+        )
+    for w in optional_warnings:
+        print(f"[STARTUP] ⚠️  {w}")
+
+    print("[STARTUP] ✅ Environment validation passed")
+
+
+_validate_env()
+
 app = FastAPI(title="Drilearn API", version="1.4.0")
 
 ALLOWED_ORIGINS = os.getenv(
@@ -168,6 +214,10 @@ class PGCursorWrapper:
         return [PostgresRowAdapter(r) for r in self._cursor.fetchall()]
 
     @property
+    def rowcount(self):
+        return self._cursor.rowcount
+
+    @property
     def lastrowid(self):
         # Postgres doesn't have lastrowid the same way SQLite does.
         # For our use case (live_players table with SERIAL id), we should use RETURNING id
@@ -213,6 +263,47 @@ def _upsert_sql(table, columns, key="id"):
         )
     else:
         return f"INSERT OR REPLACE INTO {table} ({cols_sql}) VALUES ({placeholders})"
+
+
+def _table_exists(conn, name: str) -> bool:
+    """Portable check whether a table exists (no exceptions, so it never
+    aborts a PostgreSQL transaction)."""
+    if USE_POSTGRES:
+        row = conn.execute(
+            "SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = ?",
+            (name,),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,)
+        ).fetchone()
+    return row is not None
+
+
+def _column_exists(conn, table: str, column: str) -> bool:
+    if USE_POSTGRES:
+        row = conn.execute(
+            "SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = ? AND column_name = ?",
+            (table, column),
+        ).fetchone()
+        return row is not None
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return any(r["name"] == column for r in rows)
+
+
+def _safe_migrate(conn, sql: str) -> bool:
+    """Run one schema change in its own transaction. Earlier work is committed
+    first, so a failure (e.g. the column already exists) can be rolled back
+    without undoing anything else."""
+    try:
+        conn.commit()
+        conn.execute(sql)
+        conn.commit()
+        return True
+    except Exception:
+        if USE_POSTGRES:
+            conn.rollback()
+        return False
 
 
 def init_db():
@@ -305,6 +396,30 @@ def init_db():
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_announcements_class ON class_announcements(class_id, created_at DESC)")
 
+        # Per-question response tracking for learning analytics.
+        # One row per (submission, question) so we can compute per-question correct rates,
+        # common wrong answers, and concept-level rollups.
+        # Data auto-deletes after 90 days (privacy-first — see purge_old_responses()).
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS assignment_responses (
+                id TEXT PRIMARY KEY,
+                assignment_id TEXT NOT NULL,
+                class_id TEXT NOT NULL,
+                quiz_id TEXT NOT NULL,
+                student_name TEXT NOT NULL,
+                question_id TEXT NOT NULL,
+                question_index INTEGER NOT NULL,
+                question_text TEXT NOT NULL,
+                question_type TEXT,
+                student_answer TEXT,
+                correct_answer TEXT NOT NULL,
+                is_correct INTEGER NOT NULL,
+                submitted_at TEXT NOT NULL
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_responses_assignment ON assignment_responses(assignment_id, question_index)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_responses_submitted ON assignment_responses(submitted_at)")
+
         # Add new columns to existing tables (idempotent migrations)
         # In Postgres, a failed statement aborts the whole transaction, so we
         # commit after each successful migration and rollback after each failure.
@@ -314,33 +429,44 @@ def init_db():
             "ALTER TABLE quizzes ADD COLUMN time_limit_seconds INTEGER",
             "ALTER TABLE classes ADD COLUMN teacher_id TEXT",
         ]:
-            try:
-                conn.execute(sql)
-                conn.commit()
-            except Exception:
-                if USE_POSTGRES:
-                    conn.rollback()
+            _safe_migrate(conn, sql)
 
         # Auth tables
+        # Accounts live in `users`, with a role: student, teacher or admin.
+        # Older databases had a `teachers` table; rename it in place so every
+        # existing account (and the foreign keys pointing to it) is kept.
+        conn.commit()
+        if _table_exists(conn, "teachers") and not _table_exists(conn, "users"):
+            if _safe_migrate(conn, "ALTER TABLE teachers RENAME TO users"):
+                print("[DB] Renamed table teachers -> users")
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS teachers (
+            CREATE TABLE IF NOT EXISTS users (
                 id TEXT PRIMARY KEY,
                 email TEXT NOT NULL UNIQUE,
                 password_hash TEXT NOT NULL,
                 name TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'student',
                 created_at TEXT NOT NULL
             )
         """)
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_teachers_email ON teachers(email)")
+        conn.commit()
+        if not _column_exists(conn, "users", "role"):
+            # Every account created before roles existed was a teacher account.
+            _safe_migrate(conn, "ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'teacher'")
+        _safe_migrate(conn, "DROP INDEX IF EXISTS idx_teachers_email")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS sessions (
                 token TEXT PRIMARY KEY,
-                teacher_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 expires_at TEXT NOT NULL,
-                FOREIGN KEY (teacher_id) REFERENCES teachers(id) ON DELETE CASCADE
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
             )
         """)
+        conn.commit()
+        if _column_exists(conn, "sessions", "teacher_id"):
+            _safe_migrate(conn, "ALTER TABLE sessions RENAME COLUMN teacher_id TO user_id")
 
         # Live session tables (in-memory style but persisted briefly)
         conn.execute("""
@@ -354,7 +480,7 @@ def init_db():
                 question_started_at TEXT,
                 created_at TEXT NOT NULL,
                 FOREIGN KEY (quiz_id) REFERENCES quizzes(id),
-                FOREIGN KEY (teacher_id) REFERENCES teachers(id)
+                FOREIGN KEY (teacher_id) REFERENCES users(id)
             )
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_live_code ON live_sessions(code)")
@@ -389,7 +515,7 @@ def init_db():
         # Per user choice: clean start - clear ALL existing classes since they have no owner
         # Only run this once. Use a marker to detect first run after auth.
         try:
-            existing_marker = conn.execute("SELECT 1 FROM teachers LIMIT 1").fetchone()
+            existing_marker = conn.execute("SELECT 1 FROM users LIMIT 1").fetchone()
             # If no teacher exists yet, this is first auth-aware boot. Clear old classes.
             if not existing_marker:
                 # Only clear if there are classes without teacher_id (legacy data)
@@ -409,24 +535,77 @@ def init_db():
             "ALTER TABLE leaderboard ADD COLUMN class_id TEXT",
             "ALTER TABLE leaderboard ADD COLUMN assignment_id TEXT",
         ]:
-            try:
-                conn.execute(sql)
-                conn.commit()
-            except Exception:
-                if USE_POSTGRES:
-                    conn.rollback()
+            _safe_migrate(conn, sql)
 
         # Migrate older DBs
         for sql in [
             "ALTER TABLE quizzes ADD COLUMN source_type TEXT DEFAULT 'text'",
             "ALTER TABLE quizzes ADD COLUMN youtube_video_id TEXT",
+            "ALTER TABLE class_announcements ADD COLUMN author_id TEXT",
         ]:
-            try:
-                conn.execute(sql)
-                conn.commit()
-            except Exception:
-                if USE_POSTGRES:
-                    conn.rollback()
+            _safe_migrate(conn, sql)
+        conn.commit()
+
+        # Student accounts: link study material and results to the user who
+        # created them. The columns are nullable, so guests can still use the
+        # app and older rows stay valid; ON DELETE SET NULL keeps the material
+        # if an account is removed.
+        ownership = [
+            ("quizzes", "user_id", "TEXT REFERENCES users(id) ON DELETE SET NULL"),
+            ("flashcard_sets", "user_id", "TEXT REFERENCES users(id) ON DELETE SET NULL"),
+            ("flashcard_sets", "quiz_id", "TEXT REFERENCES quizzes(id) ON DELETE SET NULL"),
+            ("study_notes", "user_id", "TEXT REFERENCES users(id) ON DELETE SET NULL"),
+            ("leaderboard", "user_id", "TEXT REFERENCES users(id) ON DELETE SET NULL"),
+            ("class_memberships", "user_id", "TEXT REFERENCES users(id) ON DELETE SET NULL"),
+        ]
+        for table, column, definition in ownership:
+            if not _column_exists(conn, table, column):
+                _safe_migrate(conn, f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+        for idx_sql in [
+            "CREATE INDEX IF NOT EXISTS idx_quizzes_user ON quizzes(user_id, created_at DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_flashcards_user ON flashcard_sets(user_id, created_at DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_notes_user ON study_notes(user_id, created_at DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_leaderboard_user ON leaderboard(user_id, created_at DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_membership_user ON class_memberships(user_id)",
+        ]:
+            _safe_migrate(conn, idx_sql)
+
+        # Spaced-repetition progress of a signed-in student, one row per card,
+        # so the review schedule follows the student across devices.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS flashcard_progress (
+                user_id TEXT NOT NULL,
+                set_id TEXT NOT NULL,
+                card_index INTEGER NOT NULL,
+                ease REAL NOT NULL DEFAULT 2.5,
+                interval_days INTEGER NOT NULL DEFAULT 0,
+                reps INTEGER NOT NULL DEFAULT 0,
+                last_quality INTEGER,
+                next_review_at TEXT,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (user_id, set_id, card_index),
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+                FOREIGN KEY (set_id) REFERENCES flashcard_sets(id) ON DELETE CASCADE
+            )
+        """)
+        conn.commit()
+
+        # Columns that were added with ALTER TABLE earlier had no foreign key.
+        # PostgreSQL can add the constraint afterwards; NOT VALID means it is
+        # enforced for new rows without failing on old orphaned rows.
+        if USE_POSTGRES:
+            for name, sql in [
+                ("fk_classes_teacher", "ALTER TABLE classes ADD CONSTRAINT fk_classes_teacher FOREIGN KEY (teacher_id) REFERENCES users(id) ON DELETE CASCADE NOT VALID"),
+                ("fk_announcements_author", "ALTER TABLE class_announcements ADD CONSTRAINT fk_announcements_author FOREIGN KEY (author_id) REFERENCES users(id) ON DELETE SET NULL NOT VALID"),
+                ("fk_leaderboard_class", "ALTER TABLE leaderboard ADD CONSTRAINT fk_leaderboard_class FOREIGN KEY (class_id) REFERENCES classes(id) ON DELETE SET NULL NOT VALID"),
+                ("fk_leaderboard_assignment", "ALTER TABLE leaderboard ADD CONSTRAINT fk_leaderboard_assignment FOREIGN KEY (assignment_id) REFERENCES assignments(id) ON DELETE SET NULL NOT VALID"),
+                ("fk_responses_assignment", "ALTER TABLE assignment_responses ADD CONSTRAINT fk_responses_assignment FOREIGN KEY (assignment_id) REFERENCES assignments(id) ON DELETE CASCADE NOT VALID"),
+            ]:
+                exists = conn.execute(
+                    "SELECT 1 FROM information_schema.table_constraints WHERE constraint_name = ?", (name,)
+                ).fetchone()
+                if not exists:
+                    _safe_migrate(conn, sql)
         conn.commit()
 
 
@@ -437,14 +616,50 @@ init_db()
 # AUTHENTICATION
 # ===========================================================================
 
+# Bcrypt for password hashing — industry standard, intentionally slow to make
+# brute-force attacks expensive. We keep backward-compat with the old
+# SHA-256+salt format so existing accounts still work: on their next successful
+# sign-in, their password gets automatically re-hashed with bcrypt.
+try:
+    import bcrypt
+    HAS_BCRYPT = True
+except ImportError:
+    HAS_BCRYPT = False
+    print("[Auth] WARNING: bcrypt not installed. Using SHA-256 fallback. "
+          "Install with: pip install bcrypt")
+
+
 def hash_password(password: str) -> str:
-    """Salted SHA-256 hash. (bcrypt would be better but sha256 + salt is OK for a class project.)"""
+    """Hash a password with bcrypt (or SHA-256+salt as fallback).
+    Bcrypt hashes are prefixed with '$2b$' — this makes them distinguishable
+    from the legacy 'salt$sha256hex' format used by older accounts."""
+    if HAS_BCRYPT:
+        # bcrypt has a 72-byte password limit; truncate defensively
+        pwd_bytes = password.encode("utf-8")[:72]
+        return bcrypt.hashpw(pwd_bytes, bcrypt.gensalt(rounds=12)).decode("utf-8")
+    # Legacy fallback
     salt = secrets.token_hex(16)
     h = hashlib.sha256((salt + password).encode()).hexdigest()
     return f"{salt}${h}"
 
 
+def _is_bcrypt_hash(stored: str) -> bool:
+    """Bcrypt hashes always start with $2a$, $2b$, or $2y$."""
+    return stored.startswith(("$2a$", "$2b$", "$2y$"))
+
+
 def verify_password(password: str, stored: str) -> bool:
+    """Verify a password against a stored hash. Supports both new bcrypt
+    hashes and legacy SHA-256+salt hashes."""
+    if _is_bcrypt_hash(stored):
+        if not HAS_BCRYPT:
+            return False  # Can't verify bcrypt without the library
+        try:
+            pwd_bytes = password.encode("utf-8")[:72]
+            return bcrypt.checkpw(pwd_bytes, stored.encode("utf-8"))
+        except Exception:
+            return False
+    # Legacy SHA-256 verification
     try:
         salt, expected = stored.split("$", 1)
     except ValueError:
@@ -453,47 +668,128 @@ def verify_password(password: str, stored: str) -> bool:
     return secrets.compare_digest(actual, expected)
 
 
-def create_session(teacher_id: str) -> str:
+def _needs_rehash(stored: str) -> bool:
+    """Returns True if the stored hash should be upgraded to bcrypt."""
+    return HAS_BCRYPT and not _is_bcrypt_hash(stored)
+
+
+def rehash_password_if_needed(teacher_id: str, password: str, stored_hash: str):
+    """If the stored hash is the legacy format, silently re-hash with bcrypt
+    on successful sign-in. This is transparent to the user."""
+    if not _needs_rehash(stored_hash):
+        return
+    new_hash = hash_password(password)
+    try:
+        with get_db() as conn:
+            conn.execute(
+                "UPDATE users SET password_hash = ? WHERE id = ?",
+                (new_hash, teacher_id),
+            )
+            conn.commit()
+        print(f"[Auth] Upgraded password hash to bcrypt for teacher {teacher_id[:8]}...")
+    except Exception as e:
+        # Don't block sign-in if re-hashing fails
+        print(f"[Auth] Could not re-hash password for {teacher_id[:8]}...: {e}")
+
+
+def create_session(user_id: str) -> str:
     token = secrets.token_urlsafe(32)
     now = datetime.utcnow()
     exp = now + timedelta(days=30)
     with get_db() as conn:
         conn.execute(
-            "INSERT INTO sessions (token, teacher_id, created_at, expires_at) VALUES (?,?,?,?)",
-            (token, teacher_id, now.isoformat(), exp.isoformat()),
+            "INSERT INTO sessions (token, user_id, created_at, expires_at) VALUES (?,?,?,?)",
+            (token, user_id, now.isoformat(), exp.isoformat()),
         )
         conn.commit()
     return token
 
 
-def get_teacher_from_token(token: str) -> Optional[dict]:
+# Roles: a student studies and joins classes, a teacher additionally manages
+# classes, assignments and live sessions, and an admin can do everything a
+# teacher can plus manage users and content.
+ROLES = ("student", "teacher", "admin")
+TEACHER_ROLES = ("teacher", "admin")
+
+# Admin accounts are not created through the sign-up form. An account whose
+# email is listed in ADMIN_EMAILS (comma-separated) becomes admin on sign-in.
+ADMIN_EMAILS = {e.strip().lower() for e in os.getenv("ADMIN_EMAILS", "").split(",") if e.strip()}
+
+
+def _apply_admin_bootstrap(user: dict) -> dict:
+    if user and user.get("email", "").lower() in ADMIN_EMAILS and user.get("role") != "admin":
+        with get_db() as conn:
+            conn.execute("UPDATE users SET role = 'admin' WHERE id = ?", (user["id"],))
+            conn.commit()
+        user["role"] = "admin"
+        print(f"[Auth] {user['email']} promoted to admin (ADMIN_EMAILS)")
+    return user
+
+
+def get_user_from_token(token: str) -> Optional[dict]:
     with get_db() as conn:
         row = conn.execute(
-            """SELECT t.id, t.email, t.name FROM sessions s
-               JOIN teachers t ON t.id = s.teacher_id
+            """SELECT u.id, u.email, u.name, u.role FROM sessions s
+               JOIN users u ON u.id = s.user_id
                WHERE s.token = ? AND s.expires_at > ?""",
             (token, datetime.utcnow().isoformat()),
         ).fetchone()
         return dict(row) if row else None
 
 
-def require_teacher(authorization: Optional[str] = Header(None)) -> dict:
-    """FastAPI dependency: return the teacher for a valid token, else 401."""
-    if not authorization or not authorization.lower().startswith("bearer "):
-        raise HTTPException(status_code=401, detail="Sign in required.")
-    token = authorization.split(None, 1)[1].strip()
-    teacher = get_teacher_from_token(token)
-    if not teacher:
-        raise HTTPException(status_code=401, detail="Session expired. Please sign in again.")
-    return teacher
+# Older name kept so the rest of the code reads naturally.
+get_teacher_from_token = get_user_from_token
 
 
-def optional_teacher(authorization: Optional[str] = Header(None)) -> Optional[dict]:
-    """Returns teacher dict if signed in, else None (for endpoints that work both ways)."""
+def _token_from_header(authorization: Optional[str]) -> Optional[str]:
     if not authorization or not authorization.lower().startswith("bearer "):
         return None
-    token = authorization.split(None, 1)[1].strip()
-    return get_teacher_from_token(token)
+    return authorization.split(None, 1)[1].strip() or None
+
+
+def require_user(authorization: Optional[str] = Header(None)) -> dict:
+    """FastAPI dependency: any signed-in account (student, teacher or admin)."""
+    token = _token_from_header(authorization)
+    if not token:
+        raise HTTPException(status_code=401, detail="Sign in required.")
+    user = get_user_from_token(token)
+    if not user:
+        raise HTTPException(status_code=401, detail="Session expired. Please sign in again.")
+    return user
+
+
+def require_teacher(authorization: Optional[str] = Header(None)) -> dict:
+    """FastAPI dependency: a signed-in teacher or admin, else 401/403."""
+    user = require_user(authorization)
+    if user.get("role") not in TEACHER_ROLES:
+        raise HTTPException(status_code=403, detail="This action needs a teacher account.")
+    return user
+
+
+def require_admin(authorization: Optional[str] = Header(None)) -> dict:
+    """FastAPI dependency: a signed-in admin, else 401/403."""
+    user = require_user(authorization)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="This action needs an administrator account.")
+    return user
+
+
+def optional_user(authorization: Optional[str] = Header(None)) -> Optional[dict]:
+    """Returns the signed-in user, or None for guests (endpoints that work both ways)."""
+    token = _token_from_header(authorization)
+    return get_user_from_token(token) if token else None
+
+
+optional_teacher = optional_user
+
+
+def _set_owner(table: str, item_id: str, user: Optional[dict]):
+    """Attach a newly created item to the signed-in user (guests: no owner)."""
+    if not user:
+        return
+    with get_db() as conn:
+        conn.execute(f"UPDATE {table} SET user_id = ? WHERE id = ?", (user["id"], item_id))
+        conn.commit()
 
 
 def save_quiz(quiz_dict: dict):
@@ -536,11 +832,20 @@ def load_quiz(quiz_id: str) -> Optional[dict]:
         }
 
 
-def list_all_quizzes():
+def list_all_quizzes(user_id: Optional[str] = None, ids: Optional[List[str]] = None, everything: bool = False):
+    """Quizzes visible to the caller: an admin sees all, a signed-in user sees
+    their own, a guest only the ids remembered by their own browser."""
     with get_db() as conn:
-        rows = conn.execute(
-            "SELECT id, title, created_at, source_type, questions_json FROM quizzes ORDER BY created_at DESC LIMIT 100"
-        ).fetchall()
+        base = "SELECT id, title, created_at, source_type, questions_json FROM quizzes"
+        if everything:
+            rows = conn.execute(base + " ORDER BY created_at DESC LIMIT 200").fetchall()
+        elif user_id:
+            rows = conn.execute(base + " WHERE user_id = ? ORDER BY created_at DESC LIMIT 200", (user_id,)).fetchall()
+        elif ids:
+            marks = ",".join("?" * len(ids))
+            rows = conn.execute(base + f" WHERE id IN ({marks}) ORDER BY created_at DESC", tuple(ids)).fetchall()
+        else:
+            rows = []
         return [
             {
                 "id": r["id"],
@@ -553,11 +858,11 @@ def list_all_quizzes():
         ]
 
 
-def save_leaderboard_entry(quiz_id, display_name, score, total, percentage):
+def save_leaderboard_entry(quiz_id, display_name, score, total, percentage, user_id=None):
     with get_db() as conn:
         conn.execute(
-            "INSERT INTO leaderboard (quiz_id, display_name, score, total, percentage, created_at) VALUES (?,?,?,?,?,?)",
-            (quiz_id, display_name, score, total, percentage, datetime.utcnow().isoformat()),
+            "INSERT INTO leaderboard (quiz_id, display_name, score, total, percentage, created_at, user_id) VALUES (?,?,?,?,?,?,?)",
+            (quiz_id, display_name, score, total, percentage, datetime.utcnow().isoformat(), user_id),
         )
         conn.commit()
 
@@ -569,6 +874,173 @@ def get_leaderboard(quiz_id):
             (quiz_id,),
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Per-question response storage (for learning analytics dashboard)
+# ---------------------------------------------------------------------------
+
+def save_assignment_responses(assignment_id, class_id, quiz_id, student_name, quiz, results):
+    """Store one row per answered question. `results` is what _score_quiz() returns."""
+    now_iso = datetime.utcnow().isoformat()
+    # Build a lookup: question_id → (index, type) from the quiz
+    q_index = {q["id"]: (i, q.get("type", "")) for i, q in enumerate(quiz["questions"])}
+    with get_db() as conn:
+        for r in results:
+            qid = r["question_id"]
+            index, qtype = q_index.get(qid, (0, ""))
+            conn.execute(
+                """INSERT INTO assignment_responses
+                   (id, assignment_id, class_id, quiz_id, student_name,
+                    question_id, question_index, question_text, question_type,
+                    student_answer, correct_answer, is_correct, submitted_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    str(uuid.uuid4()),
+                    assignment_id, class_id, quiz_id, student_name,
+                    qid, index, r["question"], qtype,
+                    (r["user_answer"] or "")[:500],   # cap length defensively
+                    r["correct_answer"],
+                    1 if r["is_correct"] else 0,
+                    now_iso,
+                ),
+            )
+        conn.commit()
+
+
+def purge_old_responses(days=90):
+    """Delete individual answer rows older than `days` days (privacy-first).
+    Aggregate scores in the leaderboard table are kept indefinitely."""
+    cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
+    with get_db() as conn:
+        cursor = conn.execute(
+            "DELETE FROM assignment_responses WHERE submitted_at < ?",
+            (cutoff,),
+        )
+        conn.commit()
+    return cursor  # Caller can inspect if needed
+
+
+def compute_per_question_analytics(assignment_id, quiz):
+    """Compute per-question correct rates + common wrong answers for one assignment.
+    Returns a list matching the order of quiz['questions']."""
+    with get_db() as conn:
+        rows = conn.execute(
+            """SELECT question_id, question_index, question_text, question_type,
+                      student_answer, correct_answer, is_correct
+               FROM assignment_responses
+               WHERE assignment_id = ?
+               ORDER BY question_index ASC""",
+            (assignment_id,),
+        ).fetchall()
+
+    # Group by question_id
+    per_question = {}
+    for r in rows:
+        row = dict(r)
+        qid = row["question_id"]
+        if qid not in per_question:
+            per_question[qid] = {
+                "question_id": qid,
+                "question_index": row["question_index"],
+                "question": row["question_text"],
+                "correct_answer": row["correct_answer"],
+                "type": row["question_type"],
+                "total_answered": 0,
+                "correct_count": 0,
+                "wrong_answers_freq": {},  # answer -> count
+            }
+        agg = per_question[qid]
+        agg["total_answered"] += 1
+        if row["is_correct"]:
+            agg["correct_count"] += 1
+        else:
+            wrong = (row["student_answer"] or "").strip()
+            if wrong:
+                agg["wrong_answers_freq"][wrong] = agg["wrong_answers_freq"].get(wrong, 0) + 1
+
+    # Convert into output list matching quiz question order
+    out = []
+    for i, q in enumerate(quiz["questions"]):
+        qid = q["id"]
+        agg = per_question.get(qid)
+        if not agg:
+            # No response data for this question yet
+            out.append({
+                "question_id": qid,
+                "question_index": i,
+                "question": q["question"],
+                "correct_answer": q["correct_answer"],
+                "type": q.get("type", ""),
+                "total_answered": 0,
+                "correct_count": 0,
+                "correct_rate": None,
+                "difficulty_label": None,
+                "common_wrong_answers": [],
+            })
+            continue
+
+        rate = round(100 * agg["correct_count"] / agg["total_answered"], 1) if agg["total_answered"] else 0
+        # Classify difficulty by correct rate
+        if agg["total_answered"] < 3:
+            difficulty_label = "insufficient_data"
+        elif rate >= 80:
+            difficulty_label = "easy"
+        elif rate >= 50:
+            difficulty_label = "medium"
+        else:
+            difficulty_label = "hard"
+
+        # Top 3 most common wrong answers
+        common_wrong = sorted(
+            agg["wrong_answers_freq"].items(),
+            key=lambda x: x[1],
+            reverse=True,
+        )[:3]
+        common_wrong_list = [{"answer": a, "count": c} for a, c in common_wrong]
+
+        out.append({
+            "question_id": qid,
+            "question_index": i,
+            "question": q["question"],
+            "correct_answer": q["correct_answer"],
+            "type": q.get("type", ""),
+            "total_answered": agg["total_answered"],
+            "correct_count": agg["correct_count"],
+            "correct_rate": rate,
+            "difficulty_label": difficulty_label,
+            "common_wrong_answers": common_wrong_list,
+        })
+    return out
+
+
+def compute_concept_rollup(per_question_stats, quiz):
+    """Roll up per-question stats into concept-level averages.
+    Looks at `source_chunk` if it hints at a concept, otherwise groups by question type."""
+    # Simple grouping: by question type for now (multiple_choice / true_false / short_answer).
+    # A richer version would tag questions with concepts at generation time.
+    groups = {}
+    for s in per_question_stats:
+        if s["correct_rate"] is None:
+            continue
+        key = s["type"] or "unknown"
+        if key not in groups:
+            groups[key] = {"type": key, "count": 0, "correct_total": 0, "answered_total": 0}
+        groups[key]["count"] += 1
+        groups[key]["correct_total"] += s["correct_count"]
+        groups[key]["answered_total"] += s["total_answered"]
+
+    rollup = []
+    for key, g in groups.items():
+        if g["answered_total"] == 0:
+            continue
+        avg_rate = round(100 * g["correct_total"] / g["answered_total"], 1)
+        rollup.append({
+            "group": key,
+            "question_count": g["count"],
+            "average_correct_rate": avg_rate,
+        })
+    return sorted(rollup, key=lambda x: x["average_correct_rate"])
 
 
 # ---------------------------------------------------------------------------
@@ -593,34 +1065,64 @@ def random_animal_name() -> str:
 # ---------------------------------------------------------------------------
 # Rate limiting
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Rate limiting — protects against abuse and controls Azure OpenAI costs.
+#
+# Two-tier strategy:
+#   - Authenticated teachers get their own per-account quota
+#     (so a whole classroom sharing an IP doesn't share one quota)
+#   - Anonymous users share a per-IP quota (traditional behaviour)
+#
+# All quotas are in-memory and reset on server restart. For horizontal scaling
+# in production, this should be moved to Redis.
+# ---------------------------------------------------------------------------
 RATE_LIMIT_REQUESTS = int(os.getenv("RATE_LIMIT_REQUESTS", "10"))
 RATE_LIMIT_WINDOW_SEC = int(os.getenv("RATE_LIMIT_WINDOW_SEC", "3600"))
 CHAT_RATE_LIMIT = int(os.getenv("CHAT_RATE_LIMIT", "30"))
+
+# Authenticated users get a higher quota since we know who they are
+AUTH_QUIZ_RATE_LIMIT = int(os.getenv("AUTH_QUIZ_RATE_LIMIT", "30"))
+AUTH_CHAT_RATE_LIMIT = int(os.getenv("AUTH_CHAT_RATE_LIMIT", "100"))
+
 _quiz_log = defaultdict(deque)
 _chat_log = defaultdict(deque)
 
 
-def _check(log, ip, limit, window, label):
+def _check(log, key, limit, window, label):
     now = time.time()
-    while log[ip] and log[ip][0] < now - window:
-        log[ip].popleft()
-    if len(log[ip]) >= limit:
-        retry_in = int(window - (now - log[ip][0]))
+    while log[key] and log[key][0] < now - window:
+        log[key].popleft()
+    if len(log[key]) >= limit:
+        retry_in = int(window - (now - log[key][0]))
         raise HTTPException(
             status_code=429,
             detail=f"{label} rate limit reached. Try again in ~{max(1, retry_in // 60)} min.",
         )
-    log[ip].append(now)
+    log[key].append(now)
+
+
+def _rate_limit_key_and_quota(request: Request, anon_quota: int, auth_quota: int):
+    """Return (bucket_key, applicable_quota) based on whether the request
+    is authenticated. Auth check is by inspecting the Authorization header
+    without depending on FastAPI's Depends() — we call this from bare functions."""
+    auth = request.headers.get("authorization", "")
+    if auth.lower().startswith("bearer "):
+        token = auth.split(" ", 1)[1].strip()
+        teacher = get_teacher_from_token(token) if token else None
+        if teacher:
+            return f"teacher:{teacher['id']}", auth_quota
+    ip = request.client.host if request.client else "unknown"
+    return f"ip:{ip}", anon_quota
 
 
 def check_quiz_rate_limit(request: Request):
-    ip = request.client.host if request.client else "unknown"
-    _check(_quiz_log, ip, RATE_LIMIT_REQUESTS, RATE_LIMIT_WINDOW_SEC, "Quiz")
+    key, quota = _rate_limit_key_and_quota(request, RATE_LIMIT_REQUESTS, AUTH_QUIZ_RATE_LIMIT)
+    _check(_quiz_log, key, quota, RATE_LIMIT_WINDOW_SEC, "Quiz")
 
 
 def check_chat_rate_limit(request: Request):
-    ip = request.client.host if request.client else "unknown"
-    _check(_chat_log, ip, CHAT_RATE_LIMIT, RATE_LIMIT_WINDOW_SEC, "Chat")
+    key, quota = _rate_limit_key_and_quota(request, CHAT_RATE_LIMIT, AUTH_CHAT_RATE_LIMIT)
+    _check(_chat_log, key, quota, RATE_LIMIT_WINDOW_SEC, "Chat")
 
 
 # ---------------------------------------------------------------------------
@@ -1310,13 +1812,13 @@ def api_extract_concepts(req: ConceptsRequest, request: Request):
 
 
 @app.post("/api/generate-quiz", response_model=Quiz)
-def generate_quiz(req: GenerateRequest, request: Request):
+def generate_quiz(req: GenerateRequest, request: Request, user: Optional[dict] = Depends(optional_user)):
     check_quiz_rate_limit(request)
     if not req.text.strip() or len(req.text) < 100:
         raise HTTPException(status_code=400, detail="Text too short (min 100 chars).")
     if len(req.text) > 50000:
         raise HTTPException(status_code=400, detail="Text too long (max 50,000 chars).")
-    return build_quiz(
+    quiz = build_quiz(
         text=req.text,
         num_questions=req.num_questions,
         difficulty=req.difficulty,
@@ -1327,6 +1829,8 @@ def generate_quiz(req: GenerateRequest, request: Request):
         focus_concepts=req.focus_concepts,
         time_limit_seconds=req.time_limit_seconds,
     )
+    _set_owner("quizzes", quiz.id, user)
+    return quiz
 
 
 @app.get("/api/quiz/{quiz_id}", response_model=Quiz)
@@ -1399,14 +1903,15 @@ def submit_quiz(req: SubmitQuizRequest):
 
 
 @app.post("/api/leaderboard/submit")
-def leaderboard_submit(req: LeaderboardSubmitRequest):
+def leaderboard_submit(req: LeaderboardSubmitRequest, user: Optional[dict] = Depends(optional_user)):
     """Submit a score for a public quiz challenge."""
     quiz = load_quiz(req.quiz_id)
     if not quiz:
         raise HTTPException(status_code=404, detail="Quiz not found.")
     correct_count, total, pct, results = _score_quiz(quiz, req.answers)
     display_name = (req.display_name or "").strip() or random_animal_name()
-    save_leaderboard_entry(req.quiz_id, display_name, correct_count, total, pct)
+    save_leaderboard_entry(req.quiz_id, display_name, correct_count, total, pct,
+                           user_id=user["id"] if user else None)
     return {
         "quiz_id": req.quiz_id,
         "display_name": display_name,
@@ -1425,9 +1930,15 @@ def leaderboard_get(quiz_id: str):
     return {"quiz_id": quiz_id, "title": quiz["title"], "entries": entries}
 
 
+def _parse_ids(ids: Optional[str]) -> List[str]:
+    return [i for i in (ids or "").split(",") if re.fullmatch(r"[0-9a-fA-F-]{36}", i)][:100]
+
+
 @app.get("/api/quizzes")
-def list_quizzes():
-    return {"quizzes": list_all_quizzes()}
+def list_quizzes(ids: Optional[str] = None, user: Optional[dict] = Depends(optional_user)):
+    if user:
+        return {"quizzes": list_all_quizzes(user_id=user["id"], everything=user.get("role") == "admin")}
+    return {"quizzes": list_all_quizzes(ids=_parse_ids(ids))}
 
 
 @app.post("/api/chat")
@@ -1488,9 +1999,9 @@ class GenerateFlashcardsFromQuizRequest(BaseModel):
 def save_flashcard_set(fs_dict):
     with get_db() as conn:
         conn.execute(
-            _upsert_sql("flashcard_sets", ["id", "title", "created_at", "source_text_preview", "cards_json"]),
+            _upsert_sql("flashcard_sets", ["id", "title", "created_at", "source_text_preview", "cards_json", "quiz_id"]),
             (fs_dict["id"], fs_dict["title"], fs_dict["created_at"],
-             fs_dict["source_text_preview"], json.dumps(fs_dict["cards"])),
+             fs_dict["source_text_preview"], json.dumps(fs_dict["cards"]), fs_dict.get("quiz_id")),
         )
         conn.commit()
 
@@ -1507,11 +2018,16 @@ def load_flashcard_set(set_id):
         }
 
 
-def list_flashcard_sets():
+def list_flashcard_sets(user_id: Optional[str] = None, ids: Optional[List[str]] = None):
     with get_db() as conn:
-        rows = conn.execute(
-            "SELECT id, title, created_at, cards_json FROM flashcard_sets ORDER BY created_at DESC LIMIT 100"
-        ).fetchall()
+        base = "SELECT id, title, created_at, cards_json FROM flashcard_sets"
+        if user_id:
+            rows = conn.execute(base + " WHERE user_id = ? ORDER BY created_at DESC LIMIT 200", (user_id,)).fetchall()
+        elif ids:
+            marks = ",".join("?" * len(ids))
+            rows = conn.execute(base + f" WHERE id IN ({marks}) ORDER BY created_at DESC", tuple(ids)).fetchall()
+        else:
+            rows = []
         return [{
             "id": r["id"], "title": r["title"], "created_at": r["created_at"],
             "num_cards": len(json.loads(r["cards_json"])),
@@ -1579,7 +2095,8 @@ def generate_flashcards_from_text(text, count, format_kind, focus_concepts=None)
 
 
 @app.post("/api/flashcards/generate-from-text", response_model=FlashcardSet)
-def api_generate_flashcards_from_text(req: GenerateFlashcardsFromTextRequest, request: Request):
+def api_generate_flashcards_from_text(req: GenerateFlashcardsFromTextRequest, request: Request,
+                                      user: Optional[dict] = Depends(optional_user)):
     check_quiz_rate_limit(request)
     if len(req.text) > 50000:
         raise HTTPException(status_code=400, detail="Text too long.")
@@ -1600,11 +2117,13 @@ def api_generate_flashcards_from_text(req: GenerateFlashcardsFromTextRequest, re
         "cards": cards,
     }
     save_flashcard_set(fs)
+    _set_owner("flashcard_sets", fs["id"], user)
     return FlashcardSet(**fs)
 
 
 @app.post("/api/flashcards/generate-from-quiz", response_model=FlashcardSet)
-def api_generate_flashcards_from_quiz(req: GenerateFlashcardsFromQuizRequest, request: Request):
+def api_generate_flashcards_from_quiz(req: GenerateFlashcardsFromQuizRequest, request: Request,
+                                      user: Optional[dict] = Depends(optional_user)):
     check_quiz_rate_limit(request)
     quiz = load_quiz(req.quiz_id)
     if not quiz:
@@ -1628,8 +2147,10 @@ def api_generate_flashcards_from_quiz(req: GenerateFlashcardsFromQuizRequest, re
         "created_at": datetime.utcnow().isoformat(),
         "source_text_preview": quiz["source_text_preview"],
         "cards": cards,
+        "quiz_id": quiz["id"],
     }
     save_flashcard_set(fs)
+    _set_owner("flashcard_sets", fs["id"], user)
     return FlashcardSet(**fs)
 
 
@@ -1642,8 +2163,10 @@ def api_get_flashcards(set_id: str):
 
 
 @app.get("/api/flashcards")
-def api_list_flashcards():
-    return {"sets": list_flashcard_sets()}
+def api_list_flashcards(ids: Optional[str] = None, user: Optional[dict] = Depends(optional_user)):
+    if user:
+        return {"sets": list_flashcard_sets(user_id=user["id"])}
+    return {"sets": list_flashcard_sets(ids=_parse_ids(ids))}
 
 
 # ---------------------------------------------------------------------------
@@ -1683,11 +2206,16 @@ def load_note(note_id):
         return dict(row)
 
 
-def list_notes():
+def list_notes(user_id: Optional[str] = None, ids: Optional[List[str]] = None):
     with get_db() as conn:
-        rows = conn.execute(
-            "SELECT id, title, created_at, format FROM study_notes ORDER BY created_at DESC LIMIT 100"
-        ).fetchall()
+        base = "SELECT id, title, created_at, format FROM study_notes"
+        if user_id:
+            rows = conn.execute(base + " WHERE user_id = ? ORDER BY created_at DESC LIMIT 200", (user_id,)).fetchall()
+        elif ids:
+            marks = ",".join("?" * len(ids))
+            rows = conn.execute(base + f" WHERE id IN ({marks}) ORDER BY created_at DESC", tuple(ids)).fetchall()
+        else:
+            rows = []
         return [dict(r) for r in rows]
 
 
@@ -1756,7 +2284,7 @@ def generate_notes(text, format_kind, focus_concepts=None):
 
 
 @app.post("/api/notes/generate", response_model=StudyNote)
-def api_generate_notes(req: GenerateNotesRequest, request: Request):
+def api_generate_notes(req: GenerateNotesRequest, request: Request, user: Optional[dict] = Depends(optional_user)):
     check_quiz_rate_limit(request)
     if len(req.text) > 50000:
         raise HTTPException(status_code=400, detail="Text too long.")
@@ -1770,6 +2298,7 @@ def api_generate_notes(req: GenerateNotesRequest, request: Request):
         "content_md": content_md,
     }
     save_note(note)
+    _set_owner("study_notes", note["id"], user)
     return StudyNote(**note)
 
 
@@ -1782,8 +2311,10 @@ def api_get_note(note_id: str):
 
 
 @app.get("/api/notes")
-def api_list_notes():
-    return {"notes": list_notes()}
+def api_list_notes(ids: Optional[str] = None, user: Optional[dict] = Depends(optional_user)):
+    if user:
+        return {"notes": list_notes(user_id=user["id"])}
+    return {"notes": list_notes(ids=_parse_ids(ids))}
 
 
 # ===========================================================================
@@ -1820,7 +2351,8 @@ class UpdateClassRequest(BaseModel):
 
 class JoinClassRequest(BaseModel):
     code: str
-    student_name: str = Field(..., min_length=1, max_length=80)
+    # Optional for signed-in students: their account name is used instead.
+    student_name: Optional[str] = Field(default=None, max_length=80)
 
 
 class CreateAssignmentRequest(BaseModel):
@@ -1908,18 +2440,21 @@ def list_classes(teacher_id: Optional[str] = None):
         return out
 
 
-def add_membership(class_id, student_name):
+def add_membership(class_id, student_name, user_id=None):
     with get_db() as conn:
         # Don't add duplicate
         existing = conn.execute(
-            "SELECT 1 FROM class_memberships WHERE class_id = ? AND student_name = ?",
+            "SELECT id, user_id FROM class_memberships WHERE class_id = ? AND student_name = ?",
             (class_id, student_name),
         ).fetchone()
         if not existing:
             conn.execute(
-                "INSERT INTO class_memberships (class_id, student_name, joined_at) VALUES (?,?,?)",
-                (class_id, student_name, datetime.utcnow().isoformat()),
+                "INSERT INTO class_memberships (class_id, student_name, joined_at, user_id) VALUES (?,?,?,?)",
+                (class_id, student_name, datetime.utcnow().isoformat(), user_id),
             )
+            conn.commit()
+        elif user_id and not existing["user_id"]:
+            conn.execute("UPDATE class_memberships SET user_id = ? WHERE id = ?", (user_id, existing["id"]))
             conn.commit()
 
 
@@ -1972,6 +2507,12 @@ def list_class_assignments(class_id):
 
 def delete_class(class_id):
     with get_db() as conn:
+        conn.execute("DELETE FROM assignment_responses WHERE class_id = ?", (class_id,))
+        conn.execute(
+            "UPDATE leaderboard SET assignment_id = NULL WHERE assignment_id IN (SELECT id FROM assignments WHERE class_id = ?)",
+            (class_id,),
+        )
+        conn.execute("DELETE FROM class_announcements WHERE class_id = ?", (class_id,))
         conn.execute("DELETE FROM assignments WHERE class_id = ?", (class_id,))
         conn.execute("DELETE FROM class_memberships WHERE class_id = ?", (class_id,))
         conn.execute("UPDATE leaderboard SET class_id = NULL WHERE class_id = ?", (class_id,))
@@ -1982,6 +2523,7 @@ def delete_class(class_id):
 def delete_assignment(assignment_id):
     with get_db() as conn:
         conn.execute("UPDATE leaderboard SET assignment_id = NULL WHERE assignment_id = ?", (assignment_id,))
+        conn.execute("DELETE FROM assignment_responses WHERE assignment_id = ?", (assignment_id,))
         conn.execute("DELETE FROM assignments WHERE id = ?", (assignment_id,))
         conn.commit()
 
@@ -2040,7 +2582,9 @@ def _check_class_owner(class_id: str, teacher: Optional[dict]) -> dict:
     c = load_class(class_id)
     if not c:
         raise HTTPException(status_code=404, detail="Class not found.")
-    # Allow if class has no teacher_id (legacy) OR matches the signed-in teacher
+    # Allow if class has no teacher_id (legacy), the signed-in teacher owns it, or an admin asks
+    if teacher and teacher.get("role") == "admin":
+        return c
     if c.get("teacher_id") and (not teacher or c["teacher_id"] != teacher["id"]):
         raise HTTPException(status_code=403, detail="You don't have access to this class.")
     return c
@@ -2091,18 +2635,21 @@ def api_class_by_code(code: str):
 
 
 @app.post("/api/classes/join")
-def api_join_class(req: JoinClassRequest):
+def api_join_class(req: JoinClassRequest, user: Optional[dict] = Depends(optional_user)):
     c = load_class_by_code(req.code.upper().strip())
     if not c:
         raise HTTPException(status_code=404, detail="Class not found. Check the code.")
-    add_membership(c["id"], req.student_name.strip())
+    student_name = (req.student_name or "").strip() or (user["name"] if user else "")
+    if not student_name:
+        raise HTTPException(status_code=400, detail="Please enter your name.")
+    add_membership(c["id"], student_name, user["id"] if user else None)
     # Return active assignments for the student
     assignments = list_class_assignments(c["id"])
     return {
         "class": {
             "id": c["id"], "name": c["name"], "code": c["code"], "teacher_name": c["teacher_name"],
         },
-        "student_name": req.student_name.strip(),
+        "student_name": student_name,
         "assignments": assignments,
     }
 
@@ -2151,7 +2698,7 @@ def api_get_assignment(assignment_id: str):
 
 
 @app.post("/api/assignments/submit")
-def api_submit_assignment(req: SubmitAssignmentRequest):
+def api_submit_assignment(req: SubmitAssignmentRequest, user: Optional[dict] = Depends(optional_user)):
     a = load_assignment(req.assignment_id)
     if not a:
         raise HTTPException(status_code=404, detail="Assignment not found.")
@@ -2163,12 +2710,18 @@ def api_submit_assignment(req: SubmitAssignmentRequest):
     # Save with class_id and assignment_id for analytics
     with get_db() as conn:
         conn.execute(
-            """INSERT INTO leaderboard (quiz_id, display_name, score, total, percentage, created_at, class_id, assignment_id)
-               VALUES (?,?,?,?,?,?,?,?)""",
+            """INSERT INTO leaderboard (quiz_id, display_name, score, total, percentage, created_at, class_id, assignment_id, user_id)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
             (quiz["id"], name, correct, total, pct, datetime.utcnow().isoformat(),
-             a["class_id"], a["id"]),
+             a["class_id"], a["id"], user["id"] if user else None),
         )
         conn.commit()
+    # Save per-question responses for learning analytics dashboard.
+    # Failure here should not block the submission (student's score is still saved above).
+    try:
+        save_assignment_responses(a["id"], a["class_id"], quiz["id"], name, quiz, results)
+    except Exception as e:
+        print(f"[Analytics] Could not save per-question responses for {a['id']}: {e}")
     return {
         "assignment_id": a["id"],
         "student_name": name,
@@ -2183,7 +2736,7 @@ def api_submit_assignment(req: SubmitAssignmentRequest):
 # ---------------------------------------------------------------------------
 @app.get("/api/assignments/{assignment_id}/analytics")
 def api_assignment_analytics(assignment_id: str, teacher: dict = Depends(require_teacher)):
-    """Per-question correct rates and per-student scores."""
+    """Per-question correct rates, per-student scores, and concept rollup."""
     a = load_assignment(assignment_id)
     if not a:
         raise HTTPException(status_code=404, detail="Assignment not found.")
@@ -2191,6 +2744,14 @@ def api_assignment_analytics(assignment_id: str, teacher: dict = Depends(require
     quiz = load_quiz(a["quiz_id"])
     if not quiz:
         raise HTTPException(status_code=404, detail="Quiz not found.")
+
+    # Purge old responses opportunistically (cheap query, runs at most once per analytics view).
+    # This is a lazy alternative to a scheduled job — good enough for our scale.
+    try:
+        purge_old_responses(days=90)
+    except Exception as e:
+        print(f"[Analytics] Purge failed (non-fatal): {e}")
+
     with get_db() as conn:
         rows = conn.execute(
             """SELECT display_name, score, total, percentage, created_at
@@ -2199,44 +2760,33 @@ def api_assignment_analytics(assignment_id: str, teacher: dict = Depends(require
         ).fetchall()
     submissions = [dict(r) for r in rows]
 
+    # Per-question analytics (from assignment_responses table)
+    per_question_stats = compute_per_question_analytics(assignment_id, quiz)
+    concept_rollup = compute_concept_rollup(per_question_stats, quiz)
+
     if not submissions:
         return {
             "quiz_title": quiz["title"],
             "total_submissions": 0,
             "average_pct": 0,
             "submissions": [],
-            "questions": [
-                {
-                    "id": q["id"],
-                    "question": q["question"],
-                    "correct_answer": q["correct_answer"],
-                    "type": q["type"],
-                    "correct_rate": None,
-                }
-                for q in quiz["questions"]
-            ],
+            "questions": per_question_stats,   # will have all null stats
+            "concept_rollup": [],
+            "has_per_question_data": False,
         }
 
     avg = sum(s["percentage"] for s in submissions) / len(submissions)
-    # We don't store individual answers, only aggregate scores. Per-question correct rate
-    # requires more data than we currently capture. We'll return aggregate stats and a
-    # placeholder for question-level (TODO improvement).
-    questions = [
-        {
-            "id": q["id"],
-            "question": q["question"],
-            "correct_answer": q["correct_answer"],
-            "type": q["type"],
-            "difficulty": q.get("difficulty"),
-        }
-        for q in quiz["questions"]
-    ]
+    # Detect whether per-question data is available (older submissions won't have it)
+    has_data = any(q["total_answered"] > 0 for q in per_question_stats)
+
     return {
         "quiz_title": quiz["title"],
         "total_submissions": len(submissions),
         "average_pct": round(avg, 1),
         "submissions": submissions,
-        "questions": questions,
+        "questions": per_question_stats,
+        "concept_rollup": concept_rollup,
+        "has_per_question_data": has_data,
     }
 
 
@@ -2328,8 +2878,8 @@ class GradeShortAnswerRequest(BaseModel):
 def save_announcement(a):
     with get_db() as conn:
         conn.execute(
-            "INSERT INTO class_announcements (id, class_id, author_name, message, created_at) VALUES (?,?,?,?,?)",
-            (a["id"], a["class_id"], a["author_name"], a["message"], a["created_at"]),
+            "INSERT INTO class_announcements (id, class_id, author_name, message, created_at, author_id) VALUES (?,?,?,?,?,?)",
+            (a["id"], a["class_id"], a["author_name"], a["message"], a["created_at"], a.get("author_id")),
         )
         conn.commit()
 
@@ -2337,10 +2887,20 @@ def save_announcement(a):
 def list_announcements(class_id):
     with get_db() as conn:
         rows = conn.execute(
-            "SELECT id, class_id, author_name, message, created_at FROM class_announcements WHERE class_id = ? ORDER BY created_at DESC LIMIT 100",
+            "SELECT id, class_id, author_name, author_id, message, created_at FROM class_announcements WHERE class_id = ? ORDER BY created_at DESC LIMIT 100",
             (class_id,),
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+def load_announcement(announcement_id):
+    """Load a single announcement to check its author before deletion."""
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT id, class_id, author_id, author_name FROM class_announcements WHERE id = ?",
+            (announcement_id,),
+        ).fetchone()
+        return dict(row) if row else None
 
 
 def delete_announcement_db(announcement_id):
@@ -2356,6 +2916,7 @@ def api_create_announcement(req: CreateAnnouncementRequest, teacher: dict = Depe
         "id": str(uuid.uuid4()),
         "class_id": req.class_id,
         "author_name": req.author_name.strip(),
+        "author_id": teacher["id"],  # Record who created it
         "message": req.message.strip(),
         "created_at": datetime.utcnow().isoformat(),
     }
@@ -2372,8 +2933,21 @@ def api_list_announcements(class_id: str):
 
 @app.delete("/api/announcements/{announcement_id}")
 def api_delete_announcement(announcement_id: str, teacher: dict = Depends(require_teacher)):
-    # We don't store who posted, so we just trust that the route is authenticated.
-    # (For stricter rules we'd store author_id and verify ownership.)
+    announcement = load_announcement(announcement_id)
+    if not announcement:
+        raise HTTPException(status_code=404, detail="Announcement not found.")
+    # Enforce ownership: only the author can delete their own announcements.
+    # Legacy announcements (no author_id) fall back to class-owner check for
+    # backward compatibility.
+    if announcement.get("author_id"):
+        if announcement["author_id"] != teacher["id"]:
+            raise HTTPException(
+                status_code=403,
+                detail="You can only delete announcements you posted."
+            )
+    else:
+        # Legacy announcement without author_id — fall back to class-owner check
+        _check_class_owner(announcement["class_id"], teacher)
     delete_announcement_db(announcement_id)
     return {"deleted": announcement_id}
 
@@ -2447,8 +3021,11 @@ def api_grade_short_answer(req: GradeShortAnswerRequest, request: Request):
 
 class SignUpRequest(BaseModel):
     email: str = Field(..., min_length=3, max_length=200)
-    password: str = Field(..., min_length=6, max_length=200)
+    password: str = Field(..., min_length=8, max_length=200)
     name: str = Field(..., min_length=1, max_length=80)
+    # Admin can't be chosen at sign-up (see ADMIN_EMAILS). Older clients that
+    # don't send a role were teacher-only, so that stays the default.
+    role: Literal["student", "teacher"] = "teacher"
 
 
 class SignInRequest(BaseModel):
@@ -2456,27 +3033,88 @@ class SignInRequest(BaseModel):
     password: str
 
 
+# ---------------------------------------------------------------------------
+# Password strength validation — enforced on signup only.
+# Existing accounts with weaker passwords remain valid to avoid locking users out.
+# ---------------------------------------------------------------------------
+
+# Top ~25 most common weak passwords (from published breach datasets).
+# We reject these outright regardless of whether they meet character rules.
+COMMON_WEAK_PASSWORDS = frozenset({
+    "password", "password1", "password12", "password123",
+    "12345678", "123456789", "1234567890",
+    "qwerty123", "qwertyuiop", "qwerty12",
+    "abc12345", "letmein1", "welcome1", "welcome12", "welcome123",
+    "admin123", "administrator",
+    "iloveyou1", "monkey123", "dragon123",
+    "sunshine1", "princess1", "football1", "baseball1",
+    "master123", "shadow123",
+})
+
+
+def validate_password(password: str) -> None:
+    """Enforce password strength rules for new accounts.
+    Raises HTTPException(400) with a user-friendly message on failure."""
+    if len(password) < 8:
+        raise HTTPException(
+            status_code=400,
+            detail="Password must be at least 8 characters long."
+        )
+    if len(password) > 200:
+        raise HTTPException(
+            status_code=400,
+            detail="Password is too long (max 200 characters)."
+        )
+
+    # Character-class requirements
+    has_letter = any(c.isalpha() for c in password)
+    has_digit = any(c.isdigit() for c in password)
+    has_symbol = any(not c.isalnum() for c in password)
+
+    missing = []
+    if not has_letter:
+        missing.append("at least one letter")
+    if not has_digit:
+        missing.append("at least one number")
+    if not has_symbol:
+        missing.append("at least one symbol (e.g. ! @ # $ %)")
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail="Password must contain " + ", ".join(missing) + "."
+        )
+
+    # Reject known-weak passwords (case-insensitive)
+    if password.lower() in COMMON_WEAK_PASSWORDS:
+        raise HTTPException(
+            status_code=400,
+            detail="This password is too common. Please choose something less predictable."
+        )
+
+
 @app.post("/api/auth/signup")
 def api_signup(req: SignUpRequest):
     email = req.email.strip().lower()
     if "@" not in email or "." not in email:
         raise HTTPException(status_code=400, detail="Please enter a valid email.")
+    # Enforce password strength for NEW accounts only.
+    # Existing users can keep their old passwords until they choose to update.
+    validate_password(req.password)
     with get_db() as conn:
-        existing = conn.execute("SELECT 1 FROM teachers WHERE email = ?", (email,)).fetchone()
+        existing = conn.execute("SELECT 1 FROM users WHERE email = ?", (email,)).fetchone()
     if existing:
         raise HTTPException(status_code=400, detail="An account with this email already exists.")
-    teacher_id = str(uuid.uuid4())
+    user_id = str(uuid.uuid4())
     with get_db() as conn:
         conn.execute(
-            "INSERT INTO teachers (id, email, password_hash, name, created_at) VALUES (?,?,?,?,?)",
-            (teacher_id, email, hash_password(req.password), req.name.strip(), datetime.utcnow().isoformat()),
+            "INSERT INTO users (id, email, password_hash, name, role, created_at) VALUES (?,?,?,?,?,?)",
+            (user_id, email, hash_password(req.password), req.name.strip(), req.role, datetime.utcnow().isoformat()),
         )
         conn.commit()
-    token = create_session(teacher_id)
-    return {
-        "token": token,
-        "teacher": {"id": teacher_id, "email": email, "name": req.name.strip()},
-    }
+    user = _apply_admin_bootstrap({"id": user_id, "email": email, "name": req.name.strip(), "role": req.role})
+    token = create_session(user_id)
+    # "teacher" is kept as an alias for older frontends.
+    return {"token": token, "user": user, "teacher": user}
 
 
 @app.post("/api/auth/signin")
@@ -2484,23 +3122,23 @@ def api_signin(req: SignInRequest):
     email = req.email.strip().lower()
     with get_db() as conn:
         row = conn.execute(
-            "SELECT id, email, password_hash, name FROM teachers WHERE email = ?",
+            "SELECT id, email, password_hash, name, role FROM users WHERE email = ?",
             (email,),
         ).fetchone()
     if not row:
         raise HTTPException(status_code=400, detail="No account with that email.")
     if not verify_password(req.password, row["password_hash"]):
         raise HTTPException(status_code=400, detail="Wrong password.")
+    # Silently upgrade legacy SHA-256 hashes to bcrypt on successful login
+    rehash_password_if_needed(row["id"], req.password, row["password_hash"])
     token = create_session(row["id"])
-    return {
-        "token": token,
-        "teacher": {"id": row["id"], "email": row["email"], "name": row["name"]},
-    }
+    user = _apply_admin_bootstrap({"id": row["id"], "email": row["email"], "name": row["name"], "role": row["role"]})
+    return {"token": token, "user": user, "teacher": user}
 
 
 @app.get("/api/auth/me")
-def api_me(teacher: dict = Depends(require_teacher)):
-    return {"teacher": teacher}
+def api_me(user: dict = Depends(require_user)):
+    return {"user": user, "teacher": user}
 
 
 @app.post("/api/auth/signout")
@@ -2871,7 +3509,8 @@ class SuggestQuestionRequest(BaseModel):
 
 
 @app.post("/api/quiz/manual", response_model=Quiz)
-def api_create_manual_quiz(req: CreateManualQuizRequest, request: Request):
+def api_create_manual_quiz(req: CreateManualQuizRequest, request: Request,
+                           user: Optional[dict] = Depends(optional_user)):
     check_quiz_rate_limit(request)
     questions_list = []
     for q in req.questions:
@@ -2907,6 +3546,7 @@ def api_create_manual_quiz(req: CreateManualQuizRequest, request: Request):
         "time_limit_seconds": req.time_limit_seconds,
     }
     save_quiz(quiz_dict)
+    _set_owner("quizzes", quiz_dict["id"], user)
     return Quiz(**quiz_dict)
 
 
@@ -2976,3 +3616,250 @@ def api_suggest_question(req: SuggestQuestionRequest, request: Request):
         "difficulty": req.difficulty,
     }
 
+
+
+# ===========================================================================
+# STUDENT ACCOUNT: library, progress and synced flashcard reviews
+# ===========================================================================
+class ClaimRequest(BaseModel):
+    """Items a guest created in this browser before signing in."""
+    quiz_ids: List[str] = Field(default_factory=list, max_length=200)
+    flashcard_ids: List[str] = Field(default_factory=list, max_length=200)
+    note_ids: List[str] = Field(default_factory=list, max_length=200)
+
+
+class FlashcardProgressItem(BaseModel):
+    card_index: int = Field(..., ge=0, le=500)
+    ease: float = Field(2.5, ge=1.3, le=5.0)
+    interval: int = Field(0, ge=0, le=3650)
+    reps: int = Field(0, ge=0, le=1000)
+    last_quality: Optional[int] = Field(default=None, ge=0, le=5)
+
+
+@app.get("/api/me/library")
+def api_my_library(user: dict = Depends(require_user)):
+    """Everything the signed-in user has generated, newest first."""
+    return {
+        "quizzes": list_all_quizzes(user_id=user["id"]),
+        "flashcard_sets": list_flashcard_sets(user_id=user["id"]),
+        "notes": list_notes(user_id=user["id"]),
+    }
+
+
+@app.post("/api/me/claim")
+def api_claim_guest_items(req: ClaimRequest, user: dict = Depends(require_user)):
+    """After signing in, attach items created as a guest in this browser.
+    Only items that have no owner yet can be claimed."""
+    claimed = 0
+    with get_db() as conn:
+        for table, ids in (("quizzes", req.quiz_ids), ("flashcard_sets", req.flashcard_ids),
+                           ("study_notes", req.note_ids)):
+            for item_id in _parse_ids(",".join(ids)):
+                cur = conn.execute(
+                    f"UPDATE {table} SET user_id = ? WHERE id = ? AND user_id IS NULL",
+                    (user["id"], item_id),
+                )
+                claimed += getattr(cur, "rowcount", 0) or 0
+        conn.commit()
+    return {"claimed": claimed}
+
+
+@app.get("/api/me/progress")
+def api_my_progress(user: dict = Depends(require_user)):
+    """The student's results over time, classes and flashcard review state."""
+    now_iso = datetime.utcnow().isoformat()
+    with get_db() as conn:
+        attempts = conn.execute(
+            """SELECT l.quiz_id, q.title AS quiz_title, l.score, l.total, l.percentage,
+                      l.created_at, l.assignment_id, c.name AS class_name
+               FROM leaderboard l
+               JOIN quizzes q ON q.id = l.quiz_id
+               LEFT JOIN classes c ON c.id = l.class_id
+               WHERE l.user_id = ?
+               ORDER BY l.created_at DESC LIMIT 100""",
+            (user["id"],),
+        ).fetchall()
+        classes = conn.execute(
+            """SELECT c.id, c.name, c.code, c.teacher_name, m.joined_at
+               FROM class_memberships m JOIN classes c ON c.id = m.class_id
+               WHERE m.user_id = ? ORDER BY m.joined_at DESC""",
+            (user["id"],),
+        ).fetchall()
+        decks = conn.execute(
+            """SELECT p.set_id, f.title, COUNT(*) AS reviewed,
+                      SUM(CASE WHEN p.next_review_at <= ? THEN 1 ELSE 0 END) AS due
+               FROM flashcard_progress p JOIN flashcard_sets f ON f.id = p.set_id
+               WHERE p.user_id = ?
+               GROUP BY p.set_id, f.title""",
+            (now_iso, user["id"]),
+        ).fetchall()
+    attempts = [dict(r) for r in attempts]
+    average = round(sum(a["percentage"] for a in attempts) / len(attempts), 1) if attempts else None
+    return {
+        "attempts": attempts,
+        "average_percentage": average,
+        "classes": [dict(r) for r in classes],
+        "flashcard_decks": [dict(r) for r in decks],
+    }
+
+
+@app.get("/api/me/flashcards/{set_id}/progress")
+def api_get_flashcard_progress(set_id: str, user: dict = Depends(require_user)):
+    with get_db() as conn:
+        rows = conn.execute(
+            """SELECT card_index, ease, interval_days, reps, last_quality, next_review_at, updated_at
+               FROM flashcard_progress WHERE user_id = ? AND set_id = ? ORDER BY card_index""",
+            (user["id"], set_id),
+        ).fetchall()
+    return {"set_id": set_id, "cards": [dict(r) for r in rows]}
+
+
+@app.put("/api/me/flashcards/{set_id}/progress")
+def api_save_flashcard_progress(set_id: str, item: FlashcardProgressItem, user: dict = Depends(require_user)):
+    """Save the SM-2 state of one card after the student rates it."""
+    if not load_flashcard_set(set_id):
+        raise HTTPException(status_code=404, detail="Flashcard set not found.")
+    now = datetime.utcnow()
+    next_review = (now + timedelta(days=item.interval)).isoformat()
+    values = (user["id"], set_id, item.card_index, item.ease, item.interval, item.reps,
+              item.last_quality, next_review, now.isoformat())
+    if USE_POSTGRES:
+        sql = """INSERT INTO flashcard_progress
+                 (user_id, set_id, card_index, ease, interval_days, reps, last_quality, next_review_at, updated_at)
+                 VALUES (?,?,?,?,?,?,?,?,?)
+                 ON CONFLICT (user_id, set_id, card_index) DO UPDATE SET
+                   ease = EXCLUDED.ease, interval_days = EXCLUDED.interval_days, reps = EXCLUDED.reps,
+                   last_quality = EXCLUDED.last_quality, next_review_at = EXCLUDED.next_review_at,
+                   updated_at = EXCLUDED.updated_at"""
+    else:
+        sql = """INSERT OR REPLACE INTO flashcard_progress
+                 (user_id, set_id, card_index, ease, interval_days, reps, last_quality, next_review_at, updated_at)
+                 VALUES (?,?,?,?,?,?,?,?,?)"""
+    with get_db() as conn:
+        conn.execute(sql, values)
+        conn.commit()
+    return {"saved": True, "next_review_at": next_review}
+
+
+# ===========================================================================
+# ADMINISTRATION
+# ===========================================================================
+class UpdateRoleRequest(BaseModel):
+    role: Literal["student", "teacher", "admin"]
+
+
+@app.get("/api/admin/stats")
+def api_admin_stats(admin: dict = Depends(require_admin)):
+    with get_db() as conn:
+        def count(sql, params=()):
+            return conn.execute(sql, params).fetchone()["c"]
+        roles = {r: count("SELECT COUNT(*) c FROM users WHERE role = ?", (r,)) for r in ROLES}
+        return {
+            "users": roles,
+            "quizzes": count("SELECT COUNT(*) c FROM quizzes"),
+            "flashcard_sets": count("SELECT COUNT(*) c FROM flashcard_sets"),
+            "notes": count("SELECT COUNT(*) c FROM study_notes"),
+            "classes": count("SELECT COUNT(*) c FROM classes"),
+            "assignments": count("SELECT COUNT(*) c FROM assignments"),
+            "submissions": count("SELECT COUNT(*) c FROM leaderboard"),
+            "guest_items": count("SELECT COUNT(*) c FROM quizzes WHERE user_id IS NULL"),
+        }
+
+
+@app.get("/api/admin/users")
+def api_admin_users(admin: dict = Depends(require_admin)):
+    with get_db() as conn:
+        rows = conn.execute(
+            """SELECT u.id, u.email, u.name, u.role, u.created_at,
+                      (SELECT COUNT(*) FROM quizzes q WHERE q.user_id = u.id) AS quizzes,
+                      (SELECT COUNT(*) FROM classes c WHERE c.teacher_id = u.id) AS classes
+               FROM users u ORDER BY u.created_at DESC LIMIT 500"""
+        ).fetchall()
+    return {"users": [dict(r) for r in rows]}
+
+
+@app.patch("/api/admin/users/{user_id}")
+def api_admin_set_role(user_id: str, req: UpdateRoleRequest, admin: dict = Depends(require_admin)):
+    if user_id == admin["id"] and req.role != "admin":
+        raise HTTPException(status_code=400, detail="You can't remove your own admin role.")
+    with get_db() as conn:
+        row = conn.execute("SELECT 1 FROM users WHERE id = ?", (user_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="User not found.")
+        conn.execute("UPDATE users SET role = ? WHERE id = ?", (req.role, user_id))
+        conn.commit()
+    return {"updated": user_id, "role": req.role}
+
+
+@app.get("/api/admin/content")
+def api_admin_content(admin: dict = Depends(require_admin)):
+    with get_db() as conn:
+        quizzes = conn.execute(
+            """SELECT q.id, q.title, q.created_at, q.source_type, u.email AS owner
+               FROM quizzes q LEFT JOIN users u ON u.id = q.user_id
+               ORDER BY q.created_at DESC LIMIT 300"""
+        ).fetchall()
+        sets = conn.execute(
+            """SELECT f.id, f.title, f.created_at, u.email AS owner
+               FROM flashcard_sets f LEFT JOIN users u ON u.id = f.user_id
+               ORDER BY f.created_at DESC LIMIT 300"""
+        ).fetchall()
+        notes = conn.execute(
+            """SELECT n.id, n.title, n.created_at, n.format, u.email AS owner
+               FROM study_notes n LEFT JOIN users u ON u.id = n.user_id
+               ORDER BY n.created_at DESC LIMIT 300"""
+        ).fetchall()
+        classes = conn.execute(
+            """SELECT c.id, c.name, c.code, c.created_at, u.email AS owner,
+                      (SELECT COUNT(*) FROM class_memberships m WHERE m.class_id = c.id) AS students
+               FROM classes c LEFT JOIN users u ON u.id = c.teacher_id
+               ORDER BY c.created_at DESC LIMIT 300"""
+        ).fetchall()
+    return {
+        "quizzes": [dict(r) for r in quizzes],
+        "flashcard_sets": [dict(r) for r in sets],
+        "notes": [dict(r) for r in notes],
+        "classes": [dict(r) for r in classes],
+    }
+
+
+def delete_quiz_everywhere(quiz_id: str):
+    """Delete a question set and everything that depends on it, in an order
+    that works with or without enforced foreign keys."""
+    with get_db() as conn:
+        live_ids = [r["id"] for r in conn.execute("SELECT id FROM live_sessions WHERE quiz_id = ?", (quiz_id,)).fetchall()]
+        for sid in live_ids:
+            conn.execute("DELETE FROM live_answers WHERE session_id = ?", (sid,))
+            conn.execute("DELETE FROM live_players WHERE session_id = ?", (sid,))
+        conn.execute("DELETE FROM live_sessions WHERE quiz_id = ?", (quiz_id,))
+        conn.execute("DELETE FROM assignment_responses WHERE quiz_id = ?", (quiz_id,))
+        conn.execute("DELETE FROM leaderboard WHERE quiz_id = ?", (quiz_id,))
+        conn.execute("DELETE FROM assignments WHERE quiz_id = ?", (quiz_id,))
+        conn.execute("UPDATE flashcard_sets SET quiz_id = NULL WHERE quiz_id = ?", (quiz_id,))
+        conn.execute("DELETE FROM quizzes WHERE id = ?", (quiz_id,))
+        conn.commit()
+
+
+@app.delete("/api/admin/quizzes/{quiz_id}")
+def api_admin_delete_quiz(quiz_id: str, admin: dict = Depends(require_admin)):
+    if not load_quiz(quiz_id):
+        raise HTTPException(status_code=404, detail="Quiz not found.")
+    delete_quiz_everywhere(quiz_id)
+    return {"deleted": quiz_id}
+
+
+@app.delete("/api/admin/flashcards/{set_id}")
+def api_admin_delete_flashcards(set_id: str, admin: dict = Depends(require_admin)):
+    with get_db() as conn:
+        conn.execute("DELETE FROM flashcard_progress WHERE set_id = ?", (set_id,))
+        conn.execute("DELETE FROM flashcard_sets WHERE id = ?", (set_id,))
+        conn.commit()
+    return {"deleted": set_id}
+
+
+@app.delete("/api/admin/notes/{note_id}")
+def api_admin_delete_note(note_id: str, admin: dict = Depends(require_admin)):
+    with get_db() as conn:
+        conn.execute("DELETE FROM study_notes WHERE id = ?", (note_id,))
+        conn.commit()
+    return {"deleted": note_id}

@@ -4,7 +4,7 @@ import {
   GraduationCap, FileText, Clock, Calendar, Loader2, ArrowLeft, Play, ArrowRight,
   Megaphone, BookOpen, Brain, Trophy, Star, Atom, Beaker, Code,
 } from 'lucide-react'
-import { getClass, listAnnouncements } from '../api'
+import { getClass, listAnnouncements, getAuthUser } from '../api'
 
 const ICON_MAP = {
   graduation: GraduationCap, book: BookOpen, brain: Brain, trophy: Trophy,
@@ -21,7 +21,8 @@ export default function StudentClass() {
   const [announcements, setAnnouncements] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
-  const studentName = location.state?.studentName || localStorage.getItem(STORAGE_STUDENT) || 'Student'
+  // A signed-in student always submits under the account name
+  const studentName = getAuthUser()?.name || location.state?.studentName || localStorage.getItem(STORAGE_STUDENT) || 'Student'
 
   useEffect(() => { load() }, [classId])
 

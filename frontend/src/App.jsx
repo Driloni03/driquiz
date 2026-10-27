@@ -17,6 +17,9 @@ import AssignmentTake from './pages/AssignmentTake'
 import LiveHost from './pages/live/LiveHost'
 import LiveJoin from './pages/live/LiveJoin'
 import LivePlay from './pages/live/LivePlay'
+import Start from './pages/Start'
+import MyProgress from './pages/MyProgress'
+import AdminDashboard from './pages/AdminDashboard'
 
 export default function App() {
   const location = useLocation()
@@ -27,6 +30,7 @@ export default function App() {
       {!hideNavbar && <Navbar />}
       <Routes>
         <Route path="/" element={<Landing />} />
+        <Route path="/start" element={<Start />} />
         <Route path="/app" element={<CreateQuiz />} />
         <Route path="/history" element={<History />} />
         <Route path="/q/:quizId" element={<PublicQuiz />} />
@@ -35,11 +39,17 @@ export default function App() {
 
         <Route path="/signin" element={<SignIn />} />
 
-        {/* Teacher routes (gated) */}
-        <Route path="/teacher" element={<RequireAuth><TeacherDashboard /></RequireAuth>} />
-        <Route path="/teacher/class/:classId" element={<RequireAuth><ClassDetail /></RequireAuth>} />
-        <Route path="/teacher/assignment/:assignmentId/analytics" element={<RequireAuth><AssignmentAnalytics /></RequireAuth>} />
-        <Route path="/live/host/:sessionId" element={<RequireAuth><LiveHost /></RequireAuth>} />
+        {/* Any signed-in account */}
+        <Route path="/my" element={<RequireAuth><MyProgress /></RequireAuth>} />
+
+        {/* Teacher routes (teacher or admin account) */}
+        <Route path="/teacher" element={<RequireAuth role="teacher"><TeacherDashboard /></RequireAuth>} />
+        <Route path="/teacher/class/:classId" element={<RequireAuth role="teacher"><ClassDetail /></RequireAuth>} />
+        <Route path="/teacher/assignment/:assignmentId/analytics" element={<RequireAuth role="teacher"><AssignmentAnalytics /></RequireAuth>} />
+        <Route path="/live/host/:sessionId" element={<RequireAuth role="teacher"><LiveHost /></RequireAuth>} />
+
+        {/* Administration */}
+        <Route path="/admin" element={<RequireAuth role="admin"><AdminDashboard /></RequireAuth>} />
 
         {/* Student routes (open) */}
         <Route path="/join" element={<JoinClass />} />

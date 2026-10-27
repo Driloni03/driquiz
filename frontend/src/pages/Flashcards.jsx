@@ -4,7 +4,7 @@ import {
   Loader2, ArrowLeft, ArrowRight, RotateCcw, Check, X, Brain,
   Trophy, Layers, BookOpen,
 } from 'lucide-react'
-import { getFlashcardSet } from '../api'
+import { getFlashcardSet, getAuthToken, getFlashcardProgress, saveFlashcardProgress } from '../api'
 
 /* SM-2 spaced repetition algorithm
    quality: 0 (forgot), 3 (hard), 4 (good), 5 (easy)
@@ -47,12 +47,24 @@ export default function Flashcards() {
       setSet(data)
       // Load saved progress for SM-2 ease/interval if exists
       let savedCards = data.cards
-      try {
-        const saved = JSON.parse(localStorage.getItem(STORAGE_KEY(setId)) || 'null')
-        if (saved && Array.isArray(saved.cards) && saved.cards.length === data.cards.length) {
-          savedCards = data.cards.map((c, i) => ({ ...c, ...saved.cards[i] }))
-        }
-      } catch (_) {}
+      if (getAuthToken()) {
+        // Signed in: the review schedule is stored in the account (works on any device)
+        try {
+          const rows = await getFlashcardProgress(setId)
+          const byIndex = Object.fromEntries(rows.map(r => [r.card_index, r]))
+          savedCards = data.cards.map((c, i) => byIndex[i]
+            ? { ...c, ease: byIndex[i].ease, interval: byIndex[i].interval_days, reps: byIndex[i].reps }
+            : c)
+        } catch (_) {}
+      } else {
+        // Guest: progress is kept in this browser only
+        try {
+          const saved = JSON.parse(localStorage.getItem(STORAGE_KEY(setId)) || 'null')
+          if (saved && Array.isArray(saved.cards) && saved.cards.length === data.cards.length) {
+            savedCards = data.cards.map((c, i) => ({ ...c, ...saved.cards[i] }))
+          }
+        } catch (_) {}
+      }
       setCards(savedCards)
       // Initial queue: cards in order, with reps=0 cards prioritized first (new cards first)
       const indices = savedCards.map((_, i) => i)
@@ -69,7 +81,15 @@ export default function Flashcards() {
     }
   }
 
-  const persist = (newCards) => {
+  const persist = (newCards, changedIndex) => {
+    if (getAuthToken() && changedIndex != null) {
+      const c = newCards[changedIndex]
+      saveFlashcardProgress(setId, {
+        card_index: changedIndex, ease: c.ease, interval: c.interval, reps: c.reps,
+        last_quality: c.last_quality,
+      }).catch(() => {})
+      return
+    }
     try {
       localStorage.setItem(STORAGE_KEY(setId), JSON.stringify({
         cards: newCards.map(c => ({ ease: c.ease, interval: c.interval, reps: c.reps })),
@@ -84,7 +104,7 @@ export default function Flashcards() {
     const newCards = [...cards]
     newCards[idx] = updatedCard
     setCards(newCards)
-    persist(newCards)
+    persist(newCards, idx)
 
     // Stats
     setStats(prev => {

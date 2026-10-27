@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { NavLink, Link, useNavigate, useLocation } from 'react-router-dom'
-import { Brain, GraduationCap, LogOut, User, Menu, X } from 'lucide-react'
-import { getAuthTeacher, apiSignOut } from '../api'
+import { Brain, GraduationCap, LogOut, User, Menu, X, Shield, BarChart3 } from 'lucide-react'
+import { getAuthTeacher, apiSignOut, isTeacherRole } from '../api'
 import ThemeToggle from './ThemeToggle'
 
 export default function Navbar() {
@@ -19,9 +19,11 @@ export default function Navbar() {
     window.addEventListener('storage', onStorage)
     const onFocus = () => setTeacher(getAuthTeacher())
     window.addEventListener('focus', onFocus)
+    window.addEventListener('driquiz-auth', onStorage)
     return () => {
       window.removeEventListener('storage', onStorage)
       window.removeEventListener('focus', onFocus)
+      window.removeEventListener('driquiz-auth', onStorage)
     }
   }, [])
 
@@ -43,23 +45,42 @@ export default function Navbar() {
     navigate('/')
   }
 
+  const linkClass = ({ isActive }) => `nav-link ${isActive ? 'active' : ''}`
+  // Links depend on the role: guests and students see the study links,
+  // teachers also see their dashboard, admins also see administration.
+  const showTeacher = !teacher || isTeacherRole(teacher)
   const navLinks = (
     <>
-      <NavLink to="/app" className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}>
+      <NavLink to="/app" className={linkClass}>
         Create
       </NavLink>
-      <NavLink to="/history" className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}>
+      <NavLink to="/history" className={linkClass}>
         History
       </NavLink>
-      <NavLink to="/teacher" className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}>
-        <GraduationCap size={14} style={{ verticalAlign: 'middle', marginRight: 4 }} />
-        Teacher
-      </NavLink>
-      <NavLink to="/join" className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}>
+      {teacher && (
+        <NavLink to="/my" className={linkClass}>
+          <BarChart3 size={14} style={{ verticalAlign: 'middle', marginRight: 4 }} />
+          My progress
+        </NavLink>
+      )}
+      {showTeacher && (
+        <NavLink to="/teacher" className={linkClass}>
+          <GraduationCap size={14} style={{ verticalAlign: 'middle', marginRight: 4 }} />
+          Teacher
+        </NavLink>
+      )}
+      <NavLink to="/join" className={linkClass}>
         Join class
       </NavLink>
+      {teacher?.role === 'admin' && (
+        <NavLink to="/admin" className={linkClass}>
+          <Shield size={14} style={{ verticalAlign: 'middle', marginRight: 4 }} />
+          Admin
+        </NavLink>
+      )}
     </>
   )
+  const roleLabel = { student: 'Student', teacher: 'Teacher', admin: 'Administrator' }[teacher?.role] || 'Teacher'
 
   return (
     <>
@@ -87,6 +108,7 @@ export default function Navbar() {
                     <div className="user-menu-info">
                       <div className="user-menu-name">{teacher.name}</div>
                       <div className="user-menu-email">{teacher.email}</div>
+                      <div className="user-menu-email">{roleLabel} account</div>
                     </div>
                     <button className="user-menu-item" onClick={handleSignOut}>
                       <LogOut size={14} /> Sign out
@@ -125,7 +147,7 @@ export default function Navbar() {
               <>
                 <div className="mobile-nav-user">
                   <div className="user-menu-name">{teacher.name}</div>
-                  <div className="user-menu-email">{teacher.email}</div>
+                  <div className="user-menu-email">{teacher.email} · {roleLabel}</div>
                 </div>
                 <button className="nav-link mobile-nav-signout" onClick={handleSignOut}>
                   <LogOut size={14} style={{ verticalAlign: 'middle', marginRight: 6 }} />

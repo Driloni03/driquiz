@@ -1,63 +1,63 @@
 import { Link } from 'react-router-dom'
-import { Sparkles, FileText, MessageCircle, Video, Clock, BookOpen, ArrowRight, Brain } from 'lucide-react'
+import {
+  Sparkles, FileText, MessageCircle, Mic, Clock, BookOpen, ArrowRight,
+} from 'lucide-react'
 
 export default function Landing() {
   return (
     <div className="landing">
       <section className="hero">
-        <div className="hero-badge">
-          <Sparkles size={14} /> Powered by Driloni
-        </div>
         <h1 className="hero-title">
           Turn anything into a <span className="gradient-text">quiz</span>
         </h1>
         <p className="hero-subtitle">
-          Paste your notes, upload a PDF, or drop a YouTube link.
-          Drilearn generates a quiz in seconds — with explanations, source citations, and clickable timestamps.
+          Paste your notes, upload a PDF, drop a YouTube link, or record a lecture.
+          Drilearn generates quizzes, flashcards and study notes in seconds — with
+          explanations grounded in your own material.
         </p>
         <div className="hero-cta">
-          <Link to="/app" className="btn btn-large">
-            Try It Free <ArrowRight size={18} />
+          <Link to="/start" className="btn btn-large">
+            Get started <ArrowRight size={18} />
           </Link>
           <Link to="/history" className="btn btn-secondary btn-large">
-            See Past Quizzes
+            Past quizzes
           </Link>
         </div>
-        <div className="hero-meta">No signup needed · Free to try · Built for students</div>
+        <div className="hero-meta">No signup needed to study on your own · Free to use</div>
       </section>
 
       <section className="features">
-        <h2 className="section-title">Everything you need to study smarter</h2>
+        <h2 className="section-title">What it does</h2>
         <div className="feature-grid">
           <FeatureCard
-            icon={<FileText size={22} />}
+            icon={<FileText size={20} />}
             title="Multiple sources"
-            text="Paste raw text, upload a PDF, or use a YouTube transcript. Mix and match for any subject."
+            text="Text, PDF, YouTube transcripts, or recorded audio — combined into one study set."
           />
           <FeatureCard
-            icon={<Sparkles size={22} />}
-            title="Source-grounded answers"
-            text="Every question cites the exact passage that justifies the answer. No AI hallucinations."
+            icon={<Sparkles size={20} />}
+            title="Source-grounded"
+            text="Every question cites the passage that justifies its answer, reducing hallucinations."
           />
           <FeatureCard
-            icon={<MessageCircle size={22} />}
-            title="AI tutor chat"
-            text="Stuck on a concept? Open the chatbot and ask. It already knows your study material."
+            icon={<Mic size={20} />}
+            title="Audio transcription"
+            text="Record or upload a lecture and turn the transcript into study material automatically."
           />
           <FeatureCard
-            icon={<Video size={22} />}
-            title="YouTube timestamps"
-            text="Each question links back to the exact second in the video where the answer is explained."
+            icon={<MessageCircle size={20} />}
+            title="AI tutor"
+            text="Ask follow-up questions about your material and get answers in context."
           />
           <FeatureCard
-            icon={<Clock size={22} />}
-            title="Instant scoring"
-            text="Submit and see your score plus per-question feedback with full explanations."
+            icon={<Clock size={20} />}
+            title="Spaced repetition"
+            text="Flashcards scheduled with the SuperMemo-2 algorithm for long-term retention."
           />
           <FeatureCard
-            icon={<BookOpen size={22} />}
-            title="Quiz history"
-            text="Every quiz is saved. Retake them anytime, share them with classmates via a link."
+            icon={<BookOpen size={20} />}
+            title="Classroom analytics"
+            text="Teachers see per-question accuracy and which concepts a class is struggling with."
           />
         </div>
       </section>
@@ -65,23 +65,25 @@ export default function Landing() {
       <section className="how-it-works">
         <h2 className="section-title">How it works</h2>
         <div className="steps">
-          <Step n="1" title="Add your material" text="Paste lecture notes, upload a PDF, or grab a YouTube transcript." />
-          <Step n="2" title="Pick your settings" text="Choose number of questions, difficulty, and question types." />
-          <Step n="3" title="Take the quiz" text="Get instant scoring with explanations grounded in your source." />
+          <Step n="1" title="Add your material" text="Paste notes, upload a PDF, use a YouTube link, or record a lecture." />
+          <Step n="2" title="Choose your settings" text="Question count, difficulty, question types, and optional time limit." />
+          <Step n="3" title="Study and review" text="Instant scoring with explanations, plus flashcards and summary notes." />
         </div>
       </section>
 
-      <section className="cta-bottom">
-        <h2>Ready to study?</h2>
-        <p>Generate your first quiz in under a minute.</p>
-        <Link to="/app" className="btn btn-large">
-          Get Started <ArrowRight size={18} />
-        </Link>
-      </section>
-
       <footer className="footer">
-        <p>Drilearn · Built with FastAPI, React, and Azure OpenAI</p>
+        <p>Drilearn · React, FastAPI, PostgreSQL and Azure OpenAI</p>
       </footer>
+
+      <style>{`
+        .landing .hero { padding-top: 3.5rem; padding-bottom: 2.5rem; }
+        .landing .features { padding: 2rem 0; }
+        .landing .how-it-works { padding: 2rem 0 2.5rem; }
+        .landing .footer { padding: 1.5rem 0 2.5rem; opacity: 0.55; font-size: 0.85rem; }
+        @media (max-width: 640px) {
+          .landing .hero { padding-top: 2.25rem; padding-bottom: 1.75rem; }
+        }
+      `}</style>
     </div>
   )
 }

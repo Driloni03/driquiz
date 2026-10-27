@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom'
 import {
   Loader2, Sparkles, FileText, Video, Clock, Share2, Play, Layers, ScrollText,
 } from 'lucide-react'
-import { listQuizzes, listFlashcardSets, listNotes } from '../api'
+import { listQuizzes, listFlashcardSets, listNotes, getAuthUser } from '../api'
 
 export default function History() {
   const [tab, setTab] = useState('quizzes') // 'quizzes' | 'flashcards' | 'notes'
@@ -60,13 +60,24 @@ export default function History() {
   }
 
   const total = quizzes.length + flashcards.length + notes.length
+  const user = getAuthUser()
 
   return (
     <div className="container">
       <div className="header">
         <h1>Your study materials</h1>
-        <p>{total} item{total === 1 ? '' : 's'} saved</p>
+        <p>
+          {total} item{total === 1 ? '' : 's'} {user ? 'saved to your account' : 'created in this browser'}
+        </p>
       </div>
+
+      {!user && (
+        <div className="alert alert-info" style={{ marginBottom: '1.25rem' }}>
+          You are studying as a guest, so this list only lives in this browser.{' '}
+          <Link to="/signin?mode=signup&role=student">Create a free account</Link> to keep your materials,
+          flashcard progress and results on every device. Anything you made here moves into your account.
+        </div>
+      )}
 
       <div className="tabs" style={{ marginBottom: '1.25rem' }}>
         <button className={`tab ${tab === 'quizzes' ? 'active' : ''}`} onClick={() => setTab('quizzes')}>

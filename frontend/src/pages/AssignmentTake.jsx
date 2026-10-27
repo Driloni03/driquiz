@@ -6,8 +6,7 @@ import {
 } from 'lucide-react'
 import {
   getAssignment, submitAssignment, formatTimestamp, youtubeLinkAt, fireConfetti,
-  gradeShortAnswer,
-} from '../api'
+  gradeShortAnswer, getAuthUser } from '../api'
 
 const DIFFICULTY_LABELS = { easy: 'Easy', medium: 'Medium', hard: 'Hard', mixed: 'Mixed' }
 const STORAGE_STUDENT = 'driquiz_student_name'
@@ -22,7 +21,8 @@ export default function AssignmentTake() {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
 
-  const studentName = location.state?.studentName || localStorage.getItem(STORAGE_STUDENT) || ''
+  // A signed-in student always submits under the account name
+  const studentName = getAuthUser()?.name || location.state?.studentName || localStorage.getItem(STORAGE_STUDENT) || ''
 
   useEffect(() => { load() }, [assignmentId])
 

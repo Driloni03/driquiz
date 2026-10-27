@@ -29,29 +29,74 @@ api.interceptors.response.use(
 )
 
 // Auth helpers (these don't import React; the auth context will use them)
-export const saveAuth = (token, teacher) => {
+// The signed-in account is stored under 'driquiz_teacher' for backward
+// compatibility; it now holds any account (student, teacher or admin) with its role.
+const notifyAuthChange = () => {
+  try { window.dispatchEvent(new Event('driquiz-auth')) } catch (_) {}
+}
+export const saveAuth = (token, user) => {
   localStorage.setItem('driquiz_token', token)
-  localStorage.setItem('driquiz_teacher', JSON.stringify(teacher))
+  localStorage.setItem('driquiz_teacher', JSON.stringify(user))
+  notifyAuthChange()
 }
 export const clearAuth = () => {
   localStorage.removeItem('driquiz_token')
   localStorage.removeItem('driquiz_teacher')
+  notifyAuthChange()
 }
 export const getAuthToken = () => localStorage.getItem('driquiz_token')
-export const getAuthTeacher = () => {
+export const getAuthUser = () => {
   try { return JSON.parse(localStorage.getItem('driquiz_teacher') || 'null') }
   catch (_) { return null }
 }
+export const getAuthTeacher = getAuthUser
+export const isTeacherRole = (user) => !!user && (user.role === 'teacher' || user.role === 'admin' || !user.role)
+export const homePathFor = (user) =>
+  !user ? '/app' : user.role === 'admin' ? '/admin' : isTeacherRole(user) ? '/teacher' : '/my'
+
+// Items a guest creates are remembered in this browser, so they show up in
+// History and can be moved into the account after signing in.
+const GUEST_KEY = 'driquiz_guest_items'
+const readGuestItems = () => {
+  try { return JSON.parse(localStorage.getItem(GUEST_KEY) || '{}') } catch (_) { return {} }
+}
+export const rememberCreated = (kind, id) => {
+  if (!id || getAuthToken()) return
+  try {
+    const items = readGuestItems()
+    const list = items[kind] || []
+    if (!list.includes(id)) items[kind] = [id, ...list].slice(0, 100)
+    localStorage.setItem(GUEST_KEY, JSON.stringify(items))
+  } catch (_) {}
+}
+export const getGuestIds = (kind) => readGuestItems()[kind] || []
+
+export const claimGuestItems = async () => {
+  const items = readGuestItems()
+  const body = {
+    quiz_ids: items.quizzes || [],
+    flashcard_ids: items.flashcards || [],
+    note_ids: items.notes || [],
+  }
+  if (!body.quiz_ids.length && !body.flashcard_ids.length && !body.note_ids.length) return 0
+  try {
+    const { data } = await api.post('/api/me/claim', body)
+    localStorage.removeItem(GUEST_KEY)
+    return data.claimed
+  } catch (_) { return 0 }
+}
 
 // Auth API
-export const apiSignUp = async (email, password, name) => {
-  const { data } = await api.post('/api/auth/signup', { email, password, name })
-  saveAuth(data.token, data.teacher)
+export const apiSignUp = async (email, password, name, role = 'teacher') => {
+  const { data } = await api.post('/api/auth/signup', { email, password, name, role })
+  saveAuth(data.token, data.user || data.teacher)
+  await claimGuestItems()
   return data
 }
 export const apiSignIn = async (email, password) => {
   const { data } = await api.post('/api/auth/signin', { email, password })
-  saveAuth(data.token, data.teacher)
+  saveAuth(data.token, data.user || data.teacher)
+  await claimGuestItems()
   return data
 }
 export const apiSignOut = async () => {
@@ -60,8 +105,41 @@ export const apiSignOut = async () => {
 }
 export const apiMe = async () => {
   const { data } = await api.get('/api/auth/me')
-  return data.teacher
+  const user = data.user || data.teacher
+  // Keep the stored copy fresh (e.g. a role changed by an admin)
+  const token = getAuthToken()
+  if (token && user) {
+    localStorage.setItem('driquiz_teacher', JSON.stringify(user))
+  }
+  return user
 }
+
+// =================== STUDENT ACCOUNT ===================
+export const getMyLibrary = async () => {
+  const { data } = await api.get('/api/me/library')
+  return data
+}
+export const getMyProgress = async () => {
+  const { data } = await api.get('/api/me/progress')
+  return data
+}
+export const getFlashcardProgress = async (setId) => {
+  const { data } = await api.get(`/api/me/flashcards/${setId}/progress`)
+  return data.cards
+}
+export const saveFlashcardProgress = async (setId, item) => {
+  const { data } = await api.put(`/api/me/flashcards/${setId}/progress`, item)
+  return data
+}
+
+// =================== ADMIN ===================
+export const adminStats = async () => (await api.get('/api/admin/stats')).data
+export const adminUsers = async () => (await api.get('/api/admin/users')).data.users
+export const adminSetRole = async (userId, role) => (await api.patch(`/api/admin/users/${userId}`, { role })).data
+export const adminContent = async () => (await api.get('/api/admin/content')).data
+export const adminDeleteQuiz = async (id) => (await api.delete(`/api/admin/quizzes/${id}`)).data
+export const adminDeleteFlashcards = async (id) => (await api.delete(`/api/admin/flashcards/${id}`)).data
+export const adminDeleteNote = async (id) => (await api.delete(`/api/admin/notes/${id}`)).data
 
 // Live mode API
 export const createLiveSession = async (quiz_id) => {
@@ -139,6 +217,7 @@ export const extractConcepts = async (text) => {
 
 export const generateQuiz = async (payload) => {
   const { data } = await api.post('/api/generate-quiz', payload)
+  rememberCreated('quizzes', data?.id)
   return data
 }
 
@@ -171,16 +250,23 @@ export const getPublicQuiz = async (quizId) => {
   return data
 }
 
+// Signed in: the account's own items. Guest: only items made in this browser.
+const guestParams = (kind) =>
+  getAuthToken() ? {} : { ids: getGuestIds(kind).join(',') }
+
 export const listQuizzes = async () => {
-  const { data } = await api.get('/api/quizzes')
+  const { data } = await api.get('/api/quizzes', { params: guestParams('quizzes') })
   return data.quizzes
 }
 
 // Generic streaming helper for /api/chat and /api/eli5
 const streamEndpoint = async (path, body, onDelta, signal) => {
+  const headers = { 'Content-Type': 'application/json' }
+  const token = getAuthToken()
+  if (token) headers.Authorization = `Bearer ${token}`
   const response = await fetch(`${API_BASE}${path}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body: JSON.stringify(body),
     signal,
   })
@@ -223,11 +309,13 @@ export const streamEli5 = async ({ question, answer, original_explanation, onDel
 // Flashcards
 export const generateFlashcardsFromText = async (payload) => {
   const { data } = await api.post('/api/flashcards/generate-from-text', payload)
+  rememberCreated('flashcards', data?.id)
   return data
 }
 
 export const generateFlashcardsFromQuiz = async (quiz_id, title) => {
   const { data } = await api.post('/api/flashcards/generate-from-quiz', { quiz_id, title })
+  rememberCreated('flashcards', data?.id)
   return data
 }
 
@@ -237,13 +325,14 @@ export const getFlashcardSet = async (setId) => {
 }
 
 export const listFlashcardSets = async () => {
-  const { data } = await api.get('/api/flashcards')
+  const { data } = await api.get('/api/flashcards', { params: guestParams('flashcards') })
   return data.sets
 }
 
 // Study notes
 export const generateNotes = async (payload) => {
   const { data } = await api.post('/api/notes/generate', payload)
+  rememberCreated('notes', data?.id)
   return data
 }
 
@@ -253,7 +342,7 @@ export const getNote = async (noteId) => {
 }
 
 export const listNotes = async () => {
-  const { data } = await api.get('/api/notes')
+  const { data } = await api.get('/api/notes', { params: guestParams('notes') })
   return data.notes
 }
 
@@ -355,6 +444,7 @@ export const gradeShortAnswer = async (question, correct_answer, student_answer)
 // =================== MANUAL QUIZ ===================
 export const createManualQuiz = async (payload) => {
   const { data } = await api.post('/api/quiz/manual', payload)
+  rememberCreated('quizzes', data?.id)
   return data
 }
 

@@ -1,0 +1,282 @@
+import { Link } from 'react-router-dom'
+import {
+  Sparkles, FileText, MessageCircle, Video, Clock, BookOpen, ArrowRight, Brain,
+  GraduationCap, Users, Rocket, Check,
+} from 'lucide-react'
+
+export default function Landing() {
+  return (
+    <div className="landing">
+      <section className="hero">
+        <div className="hero-badge">
+          <Sparkles size={14} /> Powered by Driloni
+        </div>
+        <h1 className="hero-title">
+          Turn anything into a <span className="gradient-text">quiz</span>
+        </h1>
+        <p className="hero-subtitle">
+          Paste your notes, upload a PDF, drop a YouTube link, or record a lecture.
+          Drilearn generates a quiz in seconds — with explanations, source citations, and clickable timestamps.
+        </p>
+        <div className="hero-cta">
+          <Link to="/app" className="btn btn-large">
+            Try It Free <ArrowRight size={18} />
+          </Link>
+          <Link to="/history" className="btn btn-secondary btn-large">
+            See Past Quizzes
+          </Link>
+        </div>
+        <div className="hero-meta">No signup needed · Free to try · Built for students</div>
+      </section>
+
+      {/* ---------- Role picker ---------- */}
+      <section className="roles">
+        <h2 className="section-title">How will you use Drilearn?</h2>
+        <p className="section-subtitle">
+          Pick the path that fits you — you can always switch later.
+        </p>
+        <div className="role-grid">
+          <RoleCard
+            icon={<GraduationCap size={26} />}
+            title="I'm a teacher"
+            text="Run classes, assign quizzes, and see exactly which questions your students struggle with."
+            points={[
+              'Create classes with a join code',
+              'Push quizzes as assignments',
+              'Per-question analytics & CSV export',
+              'Run live Kahoot-style quizzes in class',
+            ]}
+            ctaLabel="Teacher sign in"
+            ctaTo="/signin"
+            note="Free account required"
+            featured
+          />
+          <RoleCard
+            icon={<Users size={26} />}
+            title="I'm in a class"
+            text="Your teacher gave you a code. Join the class to see assignments and track your scores."
+            points={[
+              'Join with a 6-letter class code',
+              'Take assigned quizzes',
+              'See your results instantly',
+              'No account needed',
+            ]}
+            ctaLabel="Join a class"
+            ctaTo="/join"
+          />
+          <RoleCard
+            icon={<Rocket size={26} />}
+            title="Just studying on my own"
+            text="Turn your own material into quizzes, flashcards, and study notes. Nothing to sign up for."
+            points={[
+              'Quizzes from text, PDF, video or audio',
+              'Flashcards with spaced repetition',
+              'AI-generated study notes',
+              'Ask the AI tutor anything',
+            ]}
+            ctaLabel="Start studying"
+            ctaTo="/app"
+          />
+        </div>
+      </section>
+
+      <section className="features">
+        <h2 className="section-title">Everything you need to study smarter</h2>
+        <div className="feature-grid">
+          <FeatureCard
+            icon={<FileText size={22} />}
+            title="Multiple sources"
+            text="Paste raw text, upload a PDF, use a YouTube transcript, or record audio. Mix and match for any subject."
+          />
+          <FeatureCard
+            icon={<Sparkles size={22} />}
+            title="Source-grounded answers"
+            text="Every question cites the exact passage that justifies the answer. No AI hallucinations."
+          />
+          <FeatureCard
+            icon={<MessageCircle size={22} />}
+            title="AI tutor chat"
+            text="Stuck on a concept? Open the chatbot and ask. It already knows your study material."
+          />
+          <FeatureCard
+            icon={<Video size={22} />}
+            title="YouTube timestamps"
+            text="Each question links back to the exact second in the video where the answer is explained."
+          />
+          <FeatureCard
+            icon={<Clock size={22} />}
+            title="Instant scoring"
+            text="Submit and see your score plus per-question feedback with full explanations."
+          />
+          <FeatureCard
+            icon={<BookOpen size={22} />}
+            title="Quiz history"
+            text="Every quiz is saved. Retake them anytime, share them with classmates via a link."
+          />
+        </div>
+      </section>
+
+      <section className="how-it-works">
+        <h2 className="section-title">How it works</h2>
+        <div className="steps">
+          <Step n="1" title="Add your material" text="Paste lecture notes, upload a PDF, grab a YouTube transcript, or record a lecture." />
+          <Step n="2" title="Pick your settings" text="Choose number of questions, difficulty, and question types." />
+          <Step n="3" title="Take the quiz" text="Get instant scoring with explanations grounded in your source." />
+        </div>
+      </section>
+
+      <section className="cta-bottom">
+        <h2>Ready to study?</h2>
+        <p>Generate your first quiz in under a minute.</p>
+        <Link to="/app" className="btn btn-large">
+          Get Started <ArrowRight size={18} />
+        </Link>
+      </section>
+
+      <footer className="footer">
+        <p>Drilearn · Built with FastAPI, React, and Azure OpenAI</p>
+      </footer>
+
+      {/* Scoped styles for the role picker so no global CSS edit is needed */}
+      <style>{`
+        .roles {
+          padding: 3rem 0 1rem;
+        }
+        .section-subtitle {
+          text-align: center;
+          opacity: 0.7;
+          margin: -0.5rem 0 2rem;
+          font-size: 0.95rem;
+        }
+        .role-grid {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+          gap: 1.25rem;
+          align-items: stretch;
+        }
+        .role-card {
+          position: relative;
+          display: flex;
+          flex-direction: column;
+          padding: 1.75rem 1.5rem 1.5rem;
+          border-radius: 16px;
+          border: 1px solid rgba(124, 58, 237, 0.22);
+          background: linear-gradient(180deg, rgba(124,58,237,0.06), rgba(124,58,237,0.015));
+          transition: transform 0.22s ease, border-color 0.22s ease, box-shadow 0.22s ease;
+        }
+        .role-card:hover {
+          transform: translateY(-4px);
+          border-color: rgba(124, 58, 237, 0.5);
+          box-shadow: 0 12px 32px rgba(124, 58, 237, 0.18);
+        }
+        .role-card.is-featured {
+          border-color: rgba(124, 58, 237, 0.55);
+          box-shadow: 0 8px 28px rgba(124, 58, 237, 0.14);
+        }
+        .role-icon {
+          width: 52px;
+          height: 52px;
+          border-radius: 14px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          background: rgba(124, 58, 237, 0.16);
+          color: #a855f7;
+          margin-bottom: 1rem;
+        }
+        .role-card h3 {
+          margin: 0 0 0.5rem;
+          font-size: 1.15rem;
+        }
+        .role-card > p {
+          margin: 0 0 1rem;
+          opacity: 0.75;
+          font-size: 0.92rem;
+          line-height: 1.5;
+        }
+        .role-points {
+          list-style: none;
+          padding: 0;
+          margin: 0 0 1.5rem;
+          display: flex;
+          flex-direction: column;
+          gap: 0.45rem;
+          font-size: 0.88rem;
+        }
+        .role-points li {
+          display: flex;
+          align-items: flex-start;
+          gap: 0.5rem;
+          opacity: 0.85;
+        }
+        .role-points svg {
+          flex: 0 0 auto;
+          margin-top: 2px;
+          color: #10b981;
+        }
+        .role-cta-wrap {
+          margin-top: auto;
+        }
+        .role-note {
+          margin: 0.6rem 0 0;
+          text-align: center;
+          font-size: 0.78rem;
+          opacity: 0.55;
+        }
+        @media (max-width: 640px) {
+          .roles { padding-top: 2rem; }
+          .role-card { padding: 1.5rem 1.25rem 1.25rem; }
+        }
+      `}</style>
+    </div>
+  )
+}
+
+function RoleCard({ icon, title, text, points, ctaLabel, ctaTo, note, featured = false }) {
+  return (
+    <div className={`role-card ${featured ? 'is-featured' : ''}`}>
+      <div className="role-icon">{icon}</div>
+      <h3>{title}</h3>
+      <p>{text}</p>
+      <ul className="role-points">
+        {points.map((p) => (
+          <li key={p}><Check size={14} strokeWidth={3} /> <span>{p}</span></li>
+        ))}
+      </ul>
+      <div className="role-cta-wrap">
+        <Link to={ctaTo} className={`btn btn-block ${featured ? '' : 'btn-secondary'}`}>
+          {ctaLabel} <ArrowRight size={16} />
+        </Link>
+        {note && <p className="role-note">{note}</p>}
+      </div>
+    </div>
+  )
+}
+
+function FeatureCard({ icon, title, text }) {
+  const handleMouseMove = (e) => {
+    const rect = e.currentTarget.getBoundingClientRect()
+    const x = ((e.clientX - rect.left) / rect.width) * 100
+    const y = ((e.clientY - rect.top) / rect.height) * 100
+    e.currentTarget.style.setProperty('--mx', `${x}%`)
+    e.currentTarget.style.setProperty('--my', `${y}%`)
+  }
+
+  return (
+    <div className="feature-card" onMouseMove={handleMouseMove}>
+      <div className="feature-icon">{icon}</div>
+      <h3>{title}</h3>
+      <p>{text}</p>
+    </div>
+  )
+}
+
+function Step({ n, title, text }) {
+  return (
+    <div className="step">
+      <div className="step-number">{n}</div>
+      <h3>{title}</h3>
+      <p>{text}</p>
+    </div>
+  )
+}
