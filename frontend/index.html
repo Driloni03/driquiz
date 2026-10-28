@@ -3,16 +3,19 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="description" content="Drilearn — Turn anything into a quiz. AI-powered quiz generator with tutor chat." />
-    <title>Drilearn — AI Quiz Generator</title>
+    <meta name="description" content="Drilearn turns notes, PDFs, YouTube videos and lectures into quizzes, flashcards and study notes." />
+    <title>Drilearn</title>
     <script>
-      // Apply saved theme before React renders to prevent flash
-      try {
-        var saved = localStorage.getItem('driquiz_theme') || 'dark';
-        document.documentElement.setAttribute('data-theme', saved);
-      } catch (e) {
-        document.documentElement.setAttribute('data-theme', 'dark');
-      }
+      // Apply the theme before React renders to prevent a flash:
+      // the saved choice first, otherwise the operating system setting.
+      (function () {
+        var theme = 'dark';
+        try {
+          theme = localStorage.getItem('driquiz_theme') ||
+            (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+        } catch (e) {}
+        document.documentElement.setAttribute('data-theme', theme);
+      })();
     </script>
   </head>
   <body>

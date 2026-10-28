@@ -224,8 +224,8 @@ export default function CreateQuiz() {
     <>
       <div className="container">
         <div className="header">
-          <h1>Create a quiz</h1>
-          <p>Add one or more sources, then generate</p>
+          <h1>{HEADINGS[mode].title}</h1>
+          <p>{mode === 'quiz' && quizSubMode === 'manual' ? 'Write your own questions and answers' : HEADINGS[mode].sub}</p>
         </div>
 
         {error && <div className="alert alert-error">⚠️ {error}</div>}
@@ -557,26 +557,8 @@ function SourceAdder({ adderType, setAdderType, onAdd, onCancel, setError }) {
         <button
           className={`tab ${adderType === 'audio' ? 'active' : ''}`}
           onClick={() => setAdderType('audio')}
-          style={{ position: 'relative' }}
         >
           <Mic size={14} /> Audio
-          <span
-            style={{
-              position: 'absolute',
-              top: '-6px',
-              right: '-4px',
-              background: 'linear-gradient(135deg, #7c3aed, #a855f7)',
-              color: 'white',
-              fontSize: '0.6rem',
-              fontWeight: 700,
-              padding: '2px 6px',
-              borderRadius: '10px',
-              letterSpacing: '0.5px',
-              boxShadow: '0 2px 8px rgba(124, 58, 237, 0.4)',
-            }}
-          >
-            NEW
-          </span>
         </button>
       </div>
 
@@ -957,7 +939,8 @@ function AudioAdder({ onAdd, setError, onCancel }) {
               </div>
               <div style={{
                 fontSize: '2rem',
-                fontFamily: 'JetBrains Mono, monospace',
+                fontFamily: 'var(--font-display)',
+                fontVariantNumeric: 'tabular-nums',
                 fontWeight: 700,
                 color: '#ef4444',
                 marginBottom: '1rem',
@@ -1154,6 +1137,12 @@ function SettingsStep({
 /* ============================================================
    MODE PICKER
    ============================================================ */
+const HEADINGS = {
+  quiz: { title: 'Create a quiz', sub: 'Add one or more sources, then generate the questions' },
+  flashcards: { title: 'Create flashcards', sub: 'Add one or more sources, then generate the cards' },
+  notes: { title: 'Create study notes', sub: 'Add one or more sources, then generate the notes' },
+}
+
 function ModePicker({ mode, setMode, disabled }) {
   const modes = [
     { id: 'quiz', label: 'Quiz', icon: <Sparkles size={16} />, desc: 'Test your knowledge' },

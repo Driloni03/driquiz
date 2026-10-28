@@ -1,4 +1,4 @@
-import { Routes, Route, useLocation } from 'react-router-dom'
+import { Routes, Route } from 'react-router-dom'
 import Navbar from './components/Navbar'
 import RequireAuth from './components/RequireAuth'
 import Landing from './pages/Landing'
@@ -23,12 +23,9 @@ import AdminDashboard from './pages/AdminDashboard'
 import AdminUser from './pages/AdminUser'
 
 export default function App() {
-  const location = useLocation()
-  const hideNavbar = location.pathname === '/'
-
   return (
     <>
-      {!hideNavbar && <Navbar />}
+      <Navbar />
       <Routes>
         <Route path="/" element={<Landing />} />
         <Route path="/start" element={<Start />} />

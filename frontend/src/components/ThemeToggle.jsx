@@ -3,11 +3,20 @@ import { Sun, Moon } from 'lucide-react'
 
 const STORAGE_KEY = 'driquiz_theme'
 
-export const getCurrentTheme = () => {
+// Saved choice first; otherwise follow the operating system setting.
+const systemTheme = () => {
   try {
-    return localStorage.getItem(STORAGE_KEY) || 'dark'
+    return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark'
   } catch (_) {
     return 'dark'
+  }
+}
+
+export const getCurrentTheme = () => {
+  try {
+    return localStorage.getItem(STORAGE_KEY) || systemTheme()
+  } catch (_) {
+    return systemTheme()
   }
 }
 
