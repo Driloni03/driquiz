@@ -77,6 +77,9 @@ body {
 
 #root { position: relative; z-index: 1; }
 
+/* Plain text links use the accent instead of browser blue */
+a { color: var(--accent-light); text-underline-offset: 2px; }
+
 /* One heading font everywhere */
 h1, h2, h3, h4 {
   font-family: var(--font-display);
