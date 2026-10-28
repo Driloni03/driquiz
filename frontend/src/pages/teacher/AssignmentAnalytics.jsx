@@ -7,7 +7,7 @@ import {
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell,
 } from 'recharts'
-import { getAssignmentAnalytics, exportAssignmentCsvUrl } from '../../api'
+import { getAssignmentAnalytics, downloadAssignmentCsv } from '../../api'
 
 // ----------------------------------------------------------------------------
 // Colour helpers
@@ -412,9 +412,9 @@ export default function AssignmentAnalytics() {
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem', marginBottom: '1rem' }}>
           <h2 style={{ margin: 0 }}><Trophy size={20} /> Submissions ({data.total_submissions})</h2>
           {data.total_submissions > 0 && (
-            <a className="btn btn-secondary btn-small" href={exportAssignmentCsvUrl(assignmentId)} target="_blank" rel="noopener">
+            <button className="btn btn-secondary btn-small" onClick={() => downloadAssignmentCsv(assignmentId).catch(() => alert('Could not download the CSV file.'))}>
               <Download size={14} /> CSV
-            </a>
+            </button>
           )}
         </div>
 

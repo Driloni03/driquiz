@@ -26,7 +26,7 @@ const ROLES = [
     title: 'I was given a class code',
     text: 'Join your teacher\u2019s class to see assignments and your results.',
     points: [
-      'Join with a 6-letter code',
+      'Join with a 6-character code',
       'Take assigned quizzes',
       'Instant scoring',
       'Results saved if you sign in',

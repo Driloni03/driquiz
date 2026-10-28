@@ -4385,7 +4385,7 @@ html, body {
 .admin-user-row:hover .quiz-row-title { color: var(--accent-light); }
 .admin-badges { display: inline-flex; gap: 0.35rem; margin-left: 0.5rem; vertical-align: middle; }
 .admin-log { display: flex; flex-direction: column; gap: 0.5rem; }
-.admin-log-row { display: grid; grid-template-columns: 150px 1fr; gap: 0.75rem; padding: 0.7rem 0.9rem;
+.admin-log-row { display: grid; grid-template-columns: 190px 1fr; gap: 0.75rem; padding: 0.7rem 0.9rem;
   border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); font-size: 0.88rem; }
 .admin-log-time { color: var(--text-fade); font-size: 0.8rem; font-family: var(--font-mono, monospace); }
 .admin-log-main strong { font-weight: 600; }

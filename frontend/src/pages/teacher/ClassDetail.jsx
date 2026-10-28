@@ -6,7 +6,7 @@ import {
   Settings, BookOpen, Brain, Trophy as TrophyIcon, Star, Atom, Beaker, Code,
 } from 'lucide-react'
 import {
-  getClass, deleteAssignment, createAssignment, listQuizzes, exportClassCsvUrl,
+  getClass, deleteAssignment, createAssignment, listQuizzes, downloadClassCsv,
   listAnnouncements, createAnnouncement, deleteAnnouncement, updateClass,
 } from '../../api'
 
@@ -218,9 +218,9 @@ export default function ClassDetail() {
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem', flexWrap: 'wrap', gap: '0.5rem' }}>
           <h2 style={{ margin: 0 }}><FileText size={20} /> Assignments ({assignments.length})</h2>
           {assignments.length > 0 && (
-            <a className="btn btn-secondary btn-small" href={exportClassCsvUrl(classId)} target="_blank" rel="noopener">
+            <button className="btn btn-secondary btn-small" onClick={() => downloadClassCsv(classId).catch(() => alert('Could not download the CSV file.'))}>
               <Download size={14} /> Gradebook CSV
-            </a>
+            </button>
           )}
         </div>
 

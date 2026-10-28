@@ -413,11 +413,26 @@ export const getAssignmentAnalytics = async (assignmentId) => {
   return data
 }
 
-export const exportAssignmentCsvUrl = (assignmentId) =>
-  `${API_BASE}/api/assignments/${assignmentId}/export.csv`
+// CSV exports need the teacher's token, so they are fetched with the API
+// client and saved through a temporary link instead of opening a plain URL.
+const downloadCsv = async (path, fallbackName) => {
+  const res = await api.get(path, { responseType: 'blob' })
+  const match = /filename="([^"]+)"/.exec(res.headers['content-disposition'] || '')
+  const url = URL.createObjectURL(res.data)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = match ? match[1] : fallbackName
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
+}
 
-export const exportClassCsvUrl = (classId) =>
-  `${API_BASE}/api/classes/${classId}/export.csv`
+export const downloadAssignmentCsv = (assignmentId) =>
+  downloadCsv(`/api/assignments/${assignmentId}/export.csv`, 'assignment.csv')
+
+export const downloadClassCsv = (classId) =>
+  downloadCsv(`/api/classes/${classId}/export.csv`, 'gradebook.csv')
 
 
 // =================== ANNOUNCEMENTS ===================

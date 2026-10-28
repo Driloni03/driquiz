@@ -92,6 +92,7 @@ app.add_middleware(
     allow_origins=[o.strip() for o in ALLOWED_ORIGINS],
     allow_credentials=True,
     allow_methods=["*"],
+    expose_headers=["Content-Disposition"],
     allow_headers=["*"],
 )
 
@@ -2815,11 +2816,13 @@ def api_assignment_analytics(assignment_id: str, teacher: dict = Depends(require
 
 
 @app.get("/api/assignments/{assignment_id}/export.csv")
-def api_export_assignment_csv(assignment_id: str):
-    """Export submissions as CSV."""
+def api_export_assignment_csv(assignment_id: str, teacher: dict = Depends(require_teacher)):
+    """Export submissions as CSV. Only the class teacher (or an admin) may
+    download it, because it lists every student's result."""
     a = load_assignment(assignment_id)
     if not a:
         raise HTTPException(status_code=404, detail="Assignment not found.")
+    _check_class_owner(a["class_id"], teacher)
     quiz = load_quiz(a["quiz_id"])
     cls = load_class(a["class_id"])
     with get_db() as conn:
@@ -2851,11 +2854,10 @@ def api_export_assignment_csv(assignment_id: str):
 
 
 @app.get("/api/classes/{class_id}/export.csv")
-def api_export_class_csv(class_id: str):
-    """Export ALL assignment submissions for a class as a single CSV (gradebook)."""
-    cls = load_class(class_id)
-    if not cls:
-        raise HTTPException(status_code=404, detail="Class not found.")
+def api_export_class_csv(class_id: str, teacher: dict = Depends(require_teacher)):
+    """Export ALL assignment submissions for a class as a single CSV (gradebook).
+    Only the class teacher (or an admin) may download it."""
+    cls = _check_class_owner(class_id, teacher)
     with get_db() as conn:
         rows = conn.execute("""
             SELECT q.title as quiz_title, l.display_name, l.score, l.total, l.percentage, l.created_at, l.assignment_id
